@@ -36,6 +36,7 @@ export const createTable = async (req, res, next) => {
       isActive: true,
       seats: Array.from({ length: 9 }, (_, i) => ({
         seatNumber: i + 1,
+        zone,
         isBooked: false,
       })),
     });

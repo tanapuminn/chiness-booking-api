@@ -32,5 +32,6 @@ router.post('/', upload.single('paymentProof'), bookingCtr.createBooking);
 // router.post('/', bookingCtr.createBooking);
 router.put('/:id', bookingCtr.updateBooking);
 router.patch('/:id', bookingCtr.updateBookingStatus);
+router.delete('/:id', bookingCtr.deleteBooking);
 
 module.exports = router;

@@ -9,6 +9,7 @@ const tablePositionSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: true },
   seats: [{
     seatNumber: { type: Number, required: true },
+    zone: { type: String, required: true },
     isBooked: { type: Boolean, default: false },
   }],
 });
