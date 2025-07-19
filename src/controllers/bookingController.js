@@ -2,6 +2,19 @@ import bookingModel from '../models/bookingModel.js';
 import tablePositionModel from '../models/tablePositionModel.js';
 import zoneConfigModel from '../models/zoneConfigModel.js';
 import mongoose from 'mongoose';
+import { v2 as cloudinary } from 'cloudinary';
+import fs from 'fs';
+import dotenv from 'dotenv';
+import axios from 'axios';
+import XLSX from 'xlsx';
+dotenv.config();
+
+// ตั้งค่า Cloudinary (แนะนำให้ใช้ .env)
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 class ApiError extends Error {
   constructor(message, statusCode) {
@@ -154,7 +167,55 @@ export const createBooking = async (req, res, next) => {
       }
     }
 
-    // Step 2: Create booking record
+    // Step 2: Upload payment proof to Cloudinary (ถ้ามี)
+    let paymentProofUrl = null;
+    if (req.file) {
+      const branchId = process.env.SLIPOK_BRANCH_ID;
+      const apiKey = process.env.SLIPOK_API_KEY;
+      const path = req.file.path;
+      const buffer = fs.readFileSync(path);
+
+      try {
+        const slipokRes = await axios.post(
+          `https://api.slipok.com/api/line/apikey/${branchId}`,
+          {
+            files: buffer,
+            log: true,
+          },
+          {
+            headers: {
+              "x-authorization": apiKey,
+              "Content-Type": "multipart/form-data",
+            },
+          }
+        );
+        // ถ้า success จะได้ slipData
+        const slipData = slipokRes.data.data;
+        console.log('SlipOK success:', slipData);
+      } catch (err) {
+        // ถ้า slip ไม่ถูกต้อง
+        const errorData = err.response.data;
+        console.log(err.response.data)
+        return res.status(400).json({
+          message: errorData?.message || 'Invalid slip',
+          code: errorData?.code,
+        });
+      }
+
+      try {
+        const result = await cloudinary.uploader.upload(path, {
+          folder: 'booking_payment_proofs',
+        });
+        paymentProofUrl = result.secure_url;
+        // ลบไฟล์ local หลังอัปโหลด
+        fs.unlinkSync(path);
+      } catch (err) {
+        throw new Error('Failed to upload image to Cloudinary: ' + err.message);
+      }
+
+    }
+
+    // Step 3: Create booking record
     const booking = new bookingModel({
       id: `BK${Date.now()}`,
       customerName,
@@ -164,7 +225,7 @@ export const createBooking = async (req, res, next) => {
       totalPrice,
       bookingDate,
       status: 'confirmed',
-      paymentProof: req.file ? req.file.path : null,
+      paymentProof: paymentProofUrl,
     });
 
     await booking.save({ session });
@@ -314,50 +375,50 @@ export const updateBookingStatus = async (req, res, next) => {
     // รีเซ็ต isBooked เมื่อสถานะเป็น cancelled
     if (status === 'cancelled') {
       console.log('Cancelling booking, resetting seats:', booking.seats);
-      
+
       for (const seat of booking.seats) {
         // ใช้ seat.zone แทน seat.seatZone (ตรวจสอบชื่อฟิลด์ที่ถูกต้อง)
         const seatZone = seat.zone || seat.seatZone;
-        
+
         console.log(`Resetting seat - tableId: ${seat.tableId}, zone: ${seatZone}, seatNumber: ${seat.seatNumber}`);
-        
+
         // ตรวจสอบว่า table มีอยู่หรือไม่ก่อน
-        const table = await tablePositionModel.findOne({ 
-          id: seat.tableId, 
-          zone: seatZone 
+        const table = await tablePositionModel.findOne({
+          id: seat.tableId,
+          zone: seatZone
         }).session(session);
-        
+
         if (!table) {
           console.warn(`Table not found - tableId: ${seat.tableId}, zone: ${seatZone}`);
           continue;
         }
-        
+
         // ตรวจสอบว่า seat มีอยู่ใน table หรือไม่
-        const tableSeat = table.seats.find(s => 
+        const tableSeat = table.seats.find(s =>
           s.seatNumber === seat.seatNumber
         );
-        
+
         if (!tableSeat) {
           console.warn(`Seat not found in table - seatNumber: ${seat.seatNumber}, zone: ${seatZone}`);
           continue;
         }
-        
+
         // อัปเดต isBooked เป็น false
         const result = await tablePositionModel.updateOne(
-          { 
-            id: seat.tableId, 
-            zone: seatZone, 
+          {
+            id: seat.tableId,
+            zone: seatZone,
             'seats.seatNumber': seat.seatNumber
           },
           { $set: { 'seats.$.isBooked': false } },
           { session }
         );
-        
+
         console.log(`Update result for seat ${seat.seatNumber}:`, {
           matchedCount: result.matchedCount,
           modifiedCount: result.modifiedCount
         });
-        
+
         if (!result.matchedCount) {
           console.warn(`No matching document found for tableId: ${seat.tableId}, zone: ${seatZone}, seatNumber: ${seat.seatNumber}`);
         } else if (!result.modifiedCount) {
@@ -395,6 +456,37 @@ export const deleteBooking = async (req, res, next) => {
     await bookingModel.deleteOne({ id: id });
 
     res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Export bookings to XLSX
+export const exportBookingsToXlsx = async (req, res, next) => {
+  try {
+    const bookings = await bookingModel.find().select("id customerName phone seats status totalPrice bookingDate paymentProof notes").sort({ createdAt: -1 });
+    // แปลงข้อมูลเป็น array ของ object สำหรับ worksheet
+    const data = bookings.map(b => ({
+      รหัสการจอง: b.id,
+      ชื่อลูกค้า: b.customerName,
+      เบอร์โทร: b.phone,
+      ที่นั่ง: Array.isArray(b.seats) ? b.seats.map(s => `โต๊ะ${s.tableId}-ที่${s.seatNumber}-โซน${s.zone}`).join(", ") : '',
+      สถานะ: b.status,
+      "ราคารวม": b.totalPrice,
+      "วันที่จอง": b.bookingDate ? new Date(b.bookingDate).toLocaleString('th-TH') : '',
+      "หลักฐานการชำระเงิน": b.paymentProof || '',
+      หมายเหตุ: b.notes || ''
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Bookings');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const now = new Date();
+    const timestamp = now.getTime();
+    const filename = `booking_report_${timestamp}.xlsx`;
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buf);
   } catch (error) {
     next(error);
   }

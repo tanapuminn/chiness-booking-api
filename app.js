@@ -13,14 +13,14 @@ dotenv.config();
 connectDB();
 const app = express();
 
-app.use(cors());
-// app.use(
-//   cors({
-//     origin: ['http://localhost:3000'],
-//     methods: ['POST', 'GET', 'PUT', 'DELETE', 'OPTIONS'],
-//     credentials: true,
-//   })
-// );
+// app.use(cors());
+app.use(
+  cors({
+    origin: '*',
+    methods: ['POST', 'GET', 'PUT', 'DELETE', 'OPTIONS'],
+    credentials: true,
+  })
+);
 app.use(express.json());
 app.use(bodyParser.json());
 app.use(express.urlencoded({ extended: true }));

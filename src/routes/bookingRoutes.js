@@ -8,7 +8,8 @@ const router = express.Router();
 const storage = multer.diskStorage({
   destination: './uploads/',
   filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
+    const ext = path.extname(file.originalname);
+    cb(null, `${Date.now()}${ext}`);
   },
 });
 
@@ -33,5 +34,6 @@ router.post('/', upload.single('paymentProof'), bookingCtr.createBooking);
 router.put('/:id', bookingCtr.updateBooking);
 router.patch('/:id', bookingCtr.updateBookingStatus);
 router.delete('/:id', bookingCtr.deleteBooking);
+router.get('/export/xlsx', bookingCtr.exportBookingsToXlsx);
 
 module.exports = router;
