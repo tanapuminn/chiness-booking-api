@@ -29,11 +29,12 @@ const upload = multer({
 
 router.get('/', bookingCtr.getBookings);
 router.get('/:id', bookingCtr.getBookingById);
-router.post('/', upload.single('paymentProof'), bookingCtr.createBooking);
-// router.post('/', bookingCtr.createBooking);
+router.post('/', bookingCtr.createBooking); // ไม่ต้องอัปโหลดไฟล์ตอนสร้างการจอง
+router.post('/:id/confirm-payment', upload.single('paymentProof'), bookingCtr.confirmPayment); // ยืนยันการชำระเงิน
 router.put('/:id', bookingCtr.updateBooking);
 router.patch('/:id', bookingCtr.updateBookingStatus);
 router.delete('/:id', bookingCtr.deleteBooking);
 router.get('/export/xlsx', bookingCtr.exportBookingsToXlsx);
+router.post('/check-expired', bookingCtr.checkExpiredBookings); // ตรวจสอบการจองที่หมดเวลา
 
 module.exports = router;

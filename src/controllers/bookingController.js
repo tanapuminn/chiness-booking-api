@@ -1,13 +1,14 @@
-import bookingModel from '../models/bookingModel.js';
-import tablePositionModel from '../models/tablePositionModel.js';
-import zoneConfigModel from '../models/zoneConfigModel.js';
-import mongoose from 'mongoose';
-import { v2 as cloudinary } from 'cloudinary';
-import fs from 'fs';
-import dotenv from 'dotenv';
-import axios from 'axios';
-import XLSX from 'xlsx';
+const bookingModel = require('../models/bookingModel.js');
+const tablePositionModel = require('../models/tablePositionModel.js');
+const zoneConfigModel = require('../models/zoneConfigModel.js');
+const mongoose = require('mongoose');
+const { v2: cloudinary } = require('cloudinary');
+const fs = require('fs');
+const dotenv = require('dotenv');
+const axios = require('axios');
+const XLSX = require('xlsx');
 dotenv.config();
+const ApiError = require('../utils/ApiError.js');
 
 // ตั้งค่า Cloudinary (แนะนำให้ใช้ .env)
 cloudinary.config({
@@ -16,15 +17,8 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-class ApiError extends Error {
-  constructor(message, statusCode) {
-    super(message);
-    this.statusCode = statusCode;
-  }
-}
-
 // ดึงข้อมูลการจองทั้งหมด
-export const getBookings = async (req, res, next) => {
+const getBookings = async (req, res, next) => {
   try {
     const bookings = await bookingModel.find().select("id customerName phone seats status totalPrice bookingDate paymentProof notes").sort({ createdAt: -1 });
     res.json(bookings);
@@ -33,7 +27,7 @@ export const getBookings = async (req, res, next) => {
   }
 };
 // ดึงข้อมูลการจองโดย ID
-export const getBookingById = async (req, res, next) => {
+const getBookingById = async (req, res, next) => {
   try {
     const { id } = req.params;
     const booking = await bookingModel.findOne({ id });
@@ -47,7 +41,7 @@ export const getBookingById = async (req, res, next) => {
 };
 
 // สร้างการจองใหม่
-export const createBooking = async (req, res, next) => {
+const createBooking = async (req, res, next) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -59,6 +53,7 @@ export const createBooking = async (req, res, next) => {
     } catch (error) {
       throw new Error('Invalid seats format');
     }
+    console.log('body:: ', req.body);
 
     if (!customerName || !phone || !parsedSeats || !bookingDate) {
       throw new Error('Missing required fields: customerName, phone, seats, or bookingDate');
@@ -136,6 +131,7 @@ export const createBooking = async (req, res, next) => {
           const tableSeat = table.seats.find(
             (s) => s.seatNumber === seat.seatNumber
           );
+          console.log('tableSeat:: ', tableSeat);
 
           if (!tableSeat) {
             throw new Error(`Seat ${seat.seatNumber} not found in table ${seat.tableId} in zone ${seat.zone}`);
@@ -167,55 +163,11 @@ export const createBooking = async (req, res, next) => {
       }
     }
 
-    // Step 2: Upload payment proof to Cloudinary (ถ้ามี)
-    let paymentProofUrl = null;
-    if (req.file) {
-      const branchId = process.env.SLIPOK_BRANCH_ID;
-      const apiKey = process.env.SLIPOK_API_KEY;
-      const path = req.file.path;
-      const buffer = fs.readFileSync(path);
+    // Step 2: Create booking record with payment deadline
+    // const paymentDeadline = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes from now
+    const paymentDeadline = new Date(Date.now() + 60 * 1000); // 1 minutes from now
 
-      try {
-        const slipokRes = await axios.post(
-          `https://api.slipok.com/api/line/apikey/${branchId}`,
-          {
-            files: buffer,
-            log: true,
-          },
-          {
-            headers: {
-              "x-authorization": apiKey,
-              "Content-Type": "multipart/form-data",
-            },
-          }
-        );
-        // ถ้า success จะได้ slipData
-        const slipData = slipokRes.data.data;
-        console.log('SlipOK success:', slipData);
-      } catch (err) {
-        // ถ้า slip ไม่ถูกต้อง
-        const errorData = err.response.data;
-        console.log(err.response.data)
-        return res.status(400).json({
-          message: errorData?.message || 'Invalid slip',
-          code: errorData?.code,
-        });
-      }
 
-      try {
-        const result = await cloudinary.uploader.upload(path, {
-          folder: 'booking_payment_proofs',
-        });
-        paymentProofUrl = result.secure_url;
-        // ลบไฟล์ local หลังอัปโหลด
-        fs.unlinkSync(path);
-      } catch (err) {
-        throw new Error('Failed to upload image to Cloudinary: ' + err.message);
-      }
-
-    }
-
-    // Step 3: Create booking record
     const booking = new bookingModel({
       id: `BK${Date.now()}`,
       customerName,
@@ -224,15 +176,19 @@ export const createBooking = async (req, res, next) => {
       notes,
       totalPrice,
       bookingDate,
-      status: 'confirmed',
-      paymentProof: paymentProofUrl,
+      status: 'pending_payment',
+      paymentDeadline,
     });
 
     await booking.save({ session });
 
     await session.commitTransaction();
-    console.log(`Booking created successfully with ${seatsToBook.length} seats`);
-    res.status(201).json(booking);
+    console.log(`Booking created successfully with ${seatsToBook.length} seats. Payment deadline: ${paymentDeadline}`);
+    res.status(201).json({
+      ...booking.toObject(),
+      message: 'Booking created successfully. Please complete payment within 15 minutes.',
+      paymentDeadline: paymentDeadline
+    });
   } catch (error) {
     console.error('Booking creation failed:', error.message);
     await session.abortTransaction();
@@ -242,8 +198,171 @@ export const createBooking = async (req, res, next) => {
   }
 };
 
+// ยืนยันการชำระเงิน
+const confirmPayment = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      throw new Error('Booking ID is required');
+    }
+
+    // ค้นหาการจอง
+    const booking = await bookingModel.findOne({ id: id }).session(session);
+    if (!booking) {
+      throw new Error('Booking not found');
+    }
+
+    // ตรวจสอบสถานะการจอง
+    if (booking.status !== 'pending_payment') {
+      throw new Error(`Cannot confirm payment for booking with status: ${booking.status}`);
+    }
+
+    // ตรวจสอบเวลาหมดอายุ
+    if (new Date() > booking.paymentDeadline) {
+      // อัปเดตสถานะเป็น payment_timeout
+      booking.status = 'payment_timeout';
+      await booking.save({ session });
+
+      // รีเซ็ตที่นั่ง
+      for (const seat of booking.seats) {
+        await tablePositionModel.updateOne(
+          { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
+          { $set: { 'seats.$.isBooked': false } },
+          { session }
+        );
+      }
+
+      await session.commitTransaction();
+      return res.status(400).json({
+        message: 'Payment deadline has expired. Booking has been cancelled.',
+        status: 'payment_timeout'
+      });
+    }
+
+    // ตรวจสอบว่ามีไฟล์ slip หรือไม่
+    if (!req.file) {
+      throw new Error('Payment proof is required');
+    }
+
+    // Step 1: ตรวจสอบ slip ด้วย SlipOK
+    const branchId = process.env.SLIPOK_BRANCH_ID;
+    const apiKey = process.env.SLIPOK_API_KEY;
+    const path = req.file.path;
+    const buffer = fs.readFileSync(path);
+
+    try {
+      const slipokRes = await axios.post(
+        `https://api.slipok.com/api/line/apikey/${branchId}`,
+        {
+          files: buffer,
+          log: true,
+        },
+        {
+          headers: {
+            "x-authorization": apiKey,
+            "Content-Type": "multipart/form-data",
+          },
+        }
+      );
+      // ถ้า success จะได้ slipData
+      const slipData = slipokRes.data.data;
+      console.log('SlipOK success:', slipData);
+    } catch (err) {
+      // ถ้า slip ไม่ถูกต้อง
+      const errorData = err.response.data;
+      console.log(err.response.data);
+
+      // ลบไฟล์ local
+      fs.unlinkSync(path);
+
+      return res.status(400).json({
+        message: errorData?.message || 'Invalid slip',
+        code: errorData?.code,
+      });
+    }
+
+    // Step 2: อัปโหลด slip ไปยัง Cloudinary
+    let paymentProofUrl = null;
+    try {
+      const result = await cloudinary.uploader.upload(path, {
+        folder: 'booking_payment_proofs',
+      });
+      paymentProofUrl = result.secure_url;
+      // ลบไฟล์ local หลังอัปโหลด
+      fs.unlinkSync(path);
+    } catch (err) {
+      throw new Error('Failed to upload image to Cloudinary: ' + err.message);
+    }
+
+    // Step 3: อัปเดตการจอง
+    booking.status = 'confirmed';
+    booking.paymentProof = paymentProofUrl;
+    await booking.save({ session });
+
+    await session.commitTransaction();
+    console.log(`Payment confirmed for booking ${id}`);
+    res.json({
+      ...booking.toObject(),
+      message: 'Payment confirmed successfully.'
+    });
+  } catch (error) {
+    console.error('Payment confirmation failed:', error.message);
+    await session.abortTransaction();
+    next(error);
+  } finally {
+    session.endSession();
+  }
+};
+
+// ตรวจสอบและยกเลิกการจองที่หมดเวลา
+const checkAndCancelExpiredBookings = async () => {
+  try {
+    const now = new Date();
+    const expiredBookings = await bookingModel.find({
+      status: 'pending_payment',
+      paymentDeadline: { $lt: now }
+    });
+
+    console.log(`Found ${expiredBookings.length} expired bookings`);
+
+    for (const booking of expiredBookings) {
+      const session = await mongoose.startSession();
+      session.startTransaction();
+
+      try {
+        // อัปเดตสถานะเป็น payment_timeout
+        booking.status = 'payment_timeout';
+        await booking.save({ session });
+
+        // รีเซ็ตที่นั่ง
+        for (const seat of booking.seats) {
+          await tablePositionModel.updateOne(
+            { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
+            { $set: { 'seats.$.isBooked': false } },
+            { session }
+          );
+        }
+
+        await session.commitTransaction();
+        console.log(`Cancelled expired booking: ${booking.id}`);
+      } catch (error) {
+        await session.abortTransaction();
+        console.error(`Failed to cancel expired booking ${booking.id}:`, error);
+      } finally {
+        session.endSession();
+      }
+    }
+  } catch (error) {
+    console.error('Error checking expired bookings:', error);
+  }
+};
+
 // อัปเดตการจอง
-export const updateBooking = async (req, res, next) => {
+const updateBooking = async (req, res, next) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -348,7 +467,7 @@ export const updateBooking = async (req, res, next) => {
   }
 };
 
-export const updateBookingStatus = async (req, res, next) => {
+const updateBookingStatus = async (req, res, next) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -356,7 +475,7 @@ export const updateBookingStatus = async (req, res, next) => {
     const { id } = req.params;
     const { status } = req.body;
 
-    if (!['confirmed', 'cancelled'].includes(status)) {
+    if (!['pending_payment', 'confirmed', 'cancelled', 'payment_timeout'].includes(status)) {
       throw new Error('Invalid status');
     }
 
@@ -369,12 +488,16 @@ export const updateBookingStatus = async (req, res, next) => {
       throw new Error('Cannot change status from cancelled');
     }
 
+    if (booking.status === 'payment_timeout' && status !== 'payment_timeout') {
+      throw new Error('Cannot change status from payment_timeout');
+    }
+
     booking.status = status;
     await booking.save({ session });
 
-    // รีเซ็ต isBooked เมื่อสถานะเป็น cancelled
-    if (status === 'cancelled') {
-      console.log('Cancelling booking, resetting seats:', booking.seats);
+    // รีเซ็ต isBooked เมื่อสถานะเป็น cancelled หรือ payment_timeout
+    if (status === 'cancelled' || status === 'payment_timeout') {
+      console.log(`${status === 'cancelled' ? 'Cancelling' : 'Payment timeout for'} booking, resetting seats:`, booking.seats);
 
       for (const seat of booking.seats) {
         // ใช้ seat.zone แทน seat.seatZone (ตรวจสอบชื่อฟิลด์ที่ถูกต้อง)
@@ -439,7 +562,7 @@ export const updateBookingStatus = async (req, res, next) => {
 };
 
 // ลบการจอง
-export const deleteBooking = async (req, res, next) => {
+const deleteBooking = async (req, res, next) => {
   try {
     const { id } = req.params;
 
@@ -462,7 +585,7 @@ export const deleteBooking = async (req, res, next) => {
 };
 
 // Export bookings to XLSX
-export const exportBookingsToXlsx = async (req, res, next) => {
+const exportBookingsToXlsx = async (req, res, next) => {
   try {
     const bookings = await bookingModel.find().select("id customerName phone seats status totalPrice bookingDate paymentProof notes").sort({ createdAt: -1 });
     // แปลงข้อมูลเป็น array ของ object สำหรับ worksheet
@@ -471,7 +594,10 @@ export const exportBookingsToXlsx = async (req, res, next) => {
       ชื่อลูกค้า: b.customerName,
       เบอร์โทร: b.phone,
       ที่นั่ง: Array.isArray(b.seats) ? b.seats.map(s => `โต๊ะ${s.tableId}-ที่${s.seatNumber}-โซน${s.zone}`).join(", ") : '',
-      สถานะ: b.status,
+      สถานะ: b.status === 'pending_payment' ? 'รอชำระเงิน' :
+        b.status === 'confirmed' ? 'ยืนยันแล้ว' :
+          b.status === 'cancelled' ? 'ยกเลิก' :
+            b.status === 'payment_timeout' ? 'หมดเวลาชำระเงิน' : b.status,
       "ราคารวม": b.totalPrice,
       "วันที่จอง": b.bookingDate ? new Date(b.bookingDate).toLocaleString('th-TH') : '',
       "หลักฐานการชำระเงิน": b.paymentProof || '',
@@ -490,4 +616,69 @@ export const exportBookingsToXlsx = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+};
+
+// ตรวจสอบการจองที่หมดเวลาทันที (API endpoint)
+const checkExpiredBookings = async (req, res, next) => {
+  try {
+    const now = new Date();
+    const expiredBookings = await bookingModel.find({
+      status: 'pending_payment',
+      paymentDeadline: { $lt: now }
+    });
+
+    console.log(`Found ${expiredBookings.length} expired bookings`);
+
+    let cancelledCount = 0;
+    for (const booking of expiredBookings) {
+      const session = await mongoose.startSession();
+      session.startTransaction();
+
+      try {
+        // อัปเดตสถานะเป็น payment_timeout
+        booking.status = 'payment_timeout';
+        await booking.save({ session });
+
+        // รีเซ็ตที่นั่ง
+        for (const seat of booking.seats) {
+          await tablePositionModel.updateOne(
+            { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
+            { $set: { 'seats.$.isBooked': false } },
+            { session }
+          );
+        }
+
+        await session.commitTransaction();
+        console.log(`Cancelled expired booking: ${booking.id}`);
+        cancelledCount++;
+      } catch (error) {
+        await session.abortTransaction();
+        console.error(`Failed to cancel expired booking ${booking.id}:`, error);
+      } finally {
+        session.endSession();
+      }
+    }
+
+    res.json({
+      message: `Checked expired bookings. Found ${expiredBookings.length} expired bookings, cancelled ${cancelledCount} bookings.`,
+      expiredCount: expiredBookings.length,
+      cancelledCount: cancelledCount
+    });
+  } catch (error) {
+    console.error('Error checking expired bookings:', error);
+    next(error);
+  }
+};
+
+module.exports = {
+  getBookings,
+  getBookingById,
+  createBooking,
+  confirmPayment,
+  checkAndCancelExpiredBookings,
+  checkExpiredBookings,
+  updateBooking,
+  updateBookingStatus,
+  deleteBooking,
+  exportBookingsToXlsx
 };
