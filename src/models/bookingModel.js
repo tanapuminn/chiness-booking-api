@@ -18,6 +18,7 @@ const bookingSchema = new mongoose.Schema({
         tableId: { type: Number, required: true },
         seatNumber: { type: Number, required: true },
         zone: { type: String, required: true },
+        tableName: { type: String, required: true }
     }],
     notes: { 
         type: String 

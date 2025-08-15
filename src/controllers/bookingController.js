@@ -20,17 +20,150 @@ cloudinary.config({
 // ดึงข้อมูลการจองทั้งหมด
 const getBookings = async (req, res, next) => {
   try {
-    const bookings = await bookingModel.find().select("id customerName phone seats status totalPrice bookingDate paymentProof notes").sort({ createdAt: -1 });
+    const bookings = await bookingModel.aggregate([
+      {
+        $lookup: {
+          from: "tablepositions", // collection name in MongoDB
+          let: { bookingSeats: "$seats" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $in: ["$id", "$$bookingSeats.tableId"]
+                }
+              }
+            }
+          ],
+          as: "tableDetails"
+        }
+      },
+      {
+        $addFields: {
+          seats: {
+            $map: {
+              input: "$seats",
+              as: "seat",
+              in: {
+                $mergeObjects: [
+                  "$$seat",
+                  {
+                    tableName: {
+                      $let: {
+                        vars: {
+                          matchedTable: {
+                            $arrayElemAt: [
+                              {
+                                $filter: {
+                                  input: "$tableDetails",
+                                  cond: { 
+                                    $and: [
+                                      { $eq: ["$$this.id", "$$seat.tableId"] },
+                                      { $eq: ["$$this.zone", "$$seat.zone"] }
+                                    ]
+                                  }
+                                }
+                              },
+                              0
+                            ]
+                          }
+                        },
+                        in: "$$matchedTable.name"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          tableDetails: 0
+        }
+      },
+      {
+        $sort: { createdAt: -1 }
+      }
+    ]);
+
     res.json(bookings);
   } catch (error) {
     next(error);
   }
 };
+
 // ดึงข้อมูลการจองโดย ID
 const getBookingById = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const booking = await bookingModel.findOne({ id });
+    const [booking] = await bookingModel.aggregate([
+      {
+        $match: { id: id }
+      },
+      {
+        $lookup: {
+          from: "tablepositions",
+          let: { bookingSeats: "$seats" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $in: ["$id", "$$bookingSeats.tableId"]
+                }
+              }
+            }
+          ],
+          as: "tableDetails"
+        }
+      },
+      {
+        $addFields: {
+          seats: {
+            $map: {
+              input: "$seats",
+              as: "seat",
+              in: {
+                $mergeObjects: [
+                  "$$seat",
+                  {
+                    tableName: {
+                      $let: {
+                        vars: {
+                          matchedTable: {
+                            $arrayElemAt: [
+                              {
+                                $filter: {
+                                  input: "$tableDetails",
+                                  cond: { 
+                                    $and: [
+                                      { $eq: ["$$this.id", "$$seat.tableId"] },
+                                      { $eq: ["$$this.zone", "$$seat.zone"] }
+                                    ]
+                                  }
+                                }
+                              },
+                              0
+                            ]
+                          }
+                        },
+                        in: "$$matchedTable.name"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          tableDetails: 0
+        }
+      }
+    ]);
+
     if (!booking) {
       return res.status(404).json({ message: 'Booking not found' });
     }
@@ -93,6 +226,20 @@ const createBooking = async (req, res, next) => {
       for (const seat of group.seats) {
         console.log(`Attempting to book seat ${seat.seatNumber} in table ${seat.tableId} zone ${seat.zone}`);
 
+        // Get table details including name
+        const table = await tablePositionModel.findOne(
+          { id: seat.tableId, zone: seat.zone },
+          null,
+          { session }
+        );
+
+        if (!table) {
+          throw new Error(`Table ${seat.tableId} in zone ${seat.zone} not found`);
+        }
+
+        // Add table name to seat object
+        seat.tableName = table.name;
+
         // Atomic update to book the seat
         const updateResult = await tablePositionModel.findOneAndUpdate(
           {
@@ -101,8 +248,7 @@ const createBooking = async (req, res, next) => {
             'seats': {
               $elemMatch: {
                 seatNumber: seat.seatNumber,
-                // zone: seat.zone,
-                isBooked: false // Ensure seat is not booked
+                isBooked: false
               }
             }
           },
@@ -117,17 +263,6 @@ const createBooking = async (req, res, next) => {
         );
 
         if (!updateResult) {
-          // Check why the update failed
-          const table = await tablePositionModel.findOne(
-            { id: seat.tableId, zone: seat.zone },
-            null,
-            { session }
-          );
-
-          if (!table) {
-            throw new Error(`Table ${seat.tableId} in zone ${seat.zone} not found`);
-          }
-
           const tableSeat = table.seats.find(
             (s) => s.seatNumber === seat.seatNumber
           );
@@ -140,11 +275,10 @@ const createBooking = async (req, res, next) => {
           if (tableSeat.isBooked) {
             throw new ApiError(
               `Seat ${seat.seatNumber} in table ${seat.tableId} in zone ${seat.zone} is already booked`,
-              409 // Conflict status code
+              409
             );
           }
 
-          // If we reach here, the seat exists and is not booked, but the update failed for another reason
           throw new ApiError(
             `Failed to book seat ${seat.seatNumber} in table ${seat.tableId} in zone ${seat.zone} for unknown reason`,
             500
@@ -163,16 +297,13 @@ const createBooking = async (req, res, next) => {
       }
     }
 
-    // Step 2: Create booking record with payment deadline
-    // const paymentDeadline = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes from now
-    const paymentDeadline = new Date(Date.now() + 60 * 1000); // 1 minutes from now
-
+    const paymentDeadline = new Date(Date.now() + 60 * 1000); // 1 minute from now
 
     const booking = new bookingModel({
       id: `BK${Date.now()}`,
       customerName,
       phone,
-      seats: parsedSeats,
+      seats: seatsToBook, // Using seatsToBook which includes tableName
       notes,
       totalPrice,
       bookingDate,
@@ -186,7 +317,7 @@ const createBooking = async (req, res, next) => {
     console.log(`Booking created successfully with ${seatsToBook.length} seats. Payment deadline: ${paymentDeadline}`);
     res.status(201).json({
       ...booking.toObject(),
-      message: 'Booking created successfully. Please complete payment within 15 minutes.',
+      message: 'Booking created successfully. Please complete payment within 1 minute.',
       paymentDeadline: paymentDeadline
     });
   } catch (error) {
@@ -593,7 +724,7 @@ const exportBookingsToXlsx = async (req, res, next) => {
       รหัสการจอง: b.id,
       ชื่อลูกค้า: b.customerName,
       เบอร์โทร: b.phone,
-      ที่นั่ง: Array.isArray(b.seats) ? b.seats.map(s => `โต๊ะ${s.tableId}-ที่${s.seatNumber}-โซน${s.zone}`).join(", ") : '',
+      ที่นั่ง: Array.isArray(b.seats) ? b.seats.map(s => `โต๊ะ${s.tableName}-ที่นั่ง${s.seatNumber}`).join(", ") : '',
       สถานะ: b.status === 'pending_payment' ? 'รอชำระเงิน' :
         b.status === 'confirmed' ? 'ยืนยันแล้ว' :
           b.status === 'cancelled' ? 'ยกเลิก' :
