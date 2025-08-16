@@ -724,7 +724,10 @@ const exportBookingsToXlsx = async (req, res, next) => {
       รหัสการจอง: b.id,
       ชื่อลูกค้า: b.customerName,
       เบอร์โทร: b.phone,
-      ที่นั่ง: Array.isArray(b.seats) ? b.seats.map(s => `โต๊ะ${s.tableName}-ที่นั่ง${s.seatNumber}`).join(", ") : '',
+      โซน: b.seats && b.seats.length > 0 ? b.seats[0].zone : '',
+      โต๊ะ: b.seats && b.seats.length > 0 ? b.seats[0].tableName : '',
+      ที่นั่ง: Array.isArray(b.seats)  ? b.seats.map(s => `${s.seatNumber}`).join(", ") : '',
+      // ที่นั่ง: Array.isArray(b.seats) ? b.seats.map(s => `โต๊ะ${s.tableName}-ที่นั่ง${s.seatNumber}`).join(", ") : '',
       สถานะ: b.status === 'pending_payment' ? 'รอชำระเงิน' :
         b.status === 'confirmed' ? 'ยืนยันแล้ว' :
           b.status === 'cancelled' ? 'ยกเลิก' :
