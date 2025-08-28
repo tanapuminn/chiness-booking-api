@@ -579,6 +579,14 @@ const updateBooking = async (req, res, next) => {
       }
       updates.totalPrice = totalPrice;
       updates.seats = parsedSeats;
+    } else if (booking) {
+      for (const seat of booking.seats) {
+        await tablePositionModel.updateOne(
+          { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
+          { $set: { 'seats.$.isBooked': false } },
+          { session }
+        );
+      }
     }
 
     // อัปเดต booking
