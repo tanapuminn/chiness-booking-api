@@ -55,7 +55,7 @@ const getBookings = async (req, res, next) => {
                               {
                                 $filter: {
                                   input: "$tableDetails",
-                                  cond: { 
+                                  cond: {
                                     $and: [
                                       { $eq: ["$$this.id", "$$seat.tableId"] },
                                       { $eq: ["$$this.zone", "$$seat.zone"] }
@@ -135,7 +135,7 @@ const getBookingById = async (req, res, next) => {
                               {
                                 $filter: {
                                   input: "$tableDetails",
-                                  cond: { 
+                                  cond: {
                                     $and: [
                                       { $eq: ["$$this.id", "$$seat.tableId"] },
                                       { $eq: ["$$this.zone", "$$seat.zone"] }
@@ -297,7 +297,7 @@ const createBooking = async (req, res, next) => {
       }
     }
 
-    const paymentDeadline = new Date(Date.now() + 60 * 1000); // 1 minute from now
+    const paymentDeadline = new Date(Date.now() + 1 * 60 * 1000); // 1 minute from now
 
     const booking = new bookingModel({
       id: `BK${Date.now()}`,
@@ -734,7 +734,7 @@ const exportBookingsToXlsx = async (req, res, next) => {
       เบอร์โทร: b.phone,
       โซน: b.seats && b.seats.length > 0 ? b.seats[0].zone : '',
       โต๊ะ: b.seats && b.seats.length > 0 ? b.seats[0].tableName : '',
-      ที่นั่ง: Array.isArray(b.seats)  ? b.seats.map(s => `${s.seatNumber}`).join(", ") : '',
+      ที่นั่ง: Array.isArray(b.seats) ? b.seats.map(s => `${s.seatNumber}`).join(", ") : '',
       // ที่นั่ง: Array.isArray(b.seats) ? b.seats.map(s => `โต๊ะ${s.tableName}-ที่นั่ง${s.seatNumber}`).join(", ") : '',
       สถานะ: b.status === 'pending_payment' ? 'รอชำระเงิน' :
         b.status === 'confirmed' ? 'ยืนยันแล้ว' :
@@ -772,6 +772,8 @@ const checkExpiredBookings = async (req, res, next) => {
     console.log(`Found ${expiredBookings.length} expired bookings`);
 
     let cancelledCount = 0;
+    let errorMessages = [];
+
     for (const booking of expiredBookings) {
       const session = await mongoose.startSession();
       session.startTransaction();
@@ -796,19 +798,33 @@ const checkExpiredBookings = async (req, res, next) => {
       } catch (error) {
         await session.abortTransaction();
         console.error(`Failed to cancel expired booking ${booking.id}:`, error);
+        errorMessages.push(`Failed to cancel booking ${booking.id}: ${error.message}`);
       } finally {
         session.endSession();
       }
     }
 
-    res.json({
-      message: `Checked expired bookings. Found ${expiredBookings.length} expired bookings, cancelled ${cancelledCount} bookings.`,
-      expiredCount: expiredBookings.length,
-      cancelledCount: cancelledCount
-    });
+    // ตรวจสอบว่าการรีเซ็ตที่นั่งสำเร็จครบทุก booking หรือไม่
+    if (expiredBookings.length > 0) {
+      return res.status(200).json({
+        message: `Checked expired bookings. Found ${expiredBookings.length} expired bookings, successfully cancelled ${cancelledCount} bookings.`,
+        expiredCount: expiredBookings.length,
+        cancelledCount: cancelledCount
+      });
+    } else {
+      return res.status(500).json({
+        message: `Checked expired bookings. Found ${expiredBookings.length} expired bookings, but only cancelled ${cancelledCount} bookings.`,
+        expiredCount: expiredBookings.length,
+        cancelledCount: cancelledCount,
+        errors: errorMessages
+      });
+    }
   } catch (error) {
     console.error('Error checking expired bookings:', error);
-    next(error);
+    return res.status(500).json({
+      message: 'Error checking expired bookings',
+      error: error.message
+    });
   }
 };
 
