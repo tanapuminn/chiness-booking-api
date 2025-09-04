@@ -297,7 +297,8 @@ const createBooking = async (req, res, next) => {
       }
     }
 
-    const paymentDeadline = new Date(Date.now() + 1 * 60 * 1000); // 1 minute from now
+    // set timeout for payment (20 minutes)
+    const paymentDeadline = new Date(Date.now() + 2 * 60 * 1000);
 
     const booking = new bookingModel({
       id: `BK${Date.now()}`,
@@ -391,6 +392,7 @@ const confirmPayment = async (req, res, next) => {
         {
           files: buffer,
           log: true,
+          amount: req.body.amount
         },
         {
           headers: {
@@ -764,10 +766,25 @@ const exportBookingsToXlsx = async (req, res, next) => {
 const checkExpiredBookings = async (req, res, next) => {
   try {
     const now = new Date();
+    
+    // Find expired bookings
     const expiredBookings = await bookingModel.find({
       status: 'pending_payment',
       paymentDeadline: { $lt: now }
     });
+
+    // Find pending bookings to calculate remaining time
+    const pendingBookings = await bookingModel.find({
+      status: 'pending_payment',
+      paymentDeadline: { $gt: now }
+    });
+
+    // Calculate remaining time for pending bookings
+    const pendingBookingsWithTime = pendingBookings.map(booking => ({
+      id: booking.id,
+      remainingTime: Math.max(0, booking.paymentDeadline - now),
+      paymentDeadline: booking.paymentDeadline
+    }));
 
     console.log(`Found ${expiredBookings.length} expired bookings`);
 
@@ -809,13 +826,15 @@ const checkExpiredBookings = async (req, res, next) => {
       return res.status(200).json({
         message: `Checked expired bookings. Found ${expiredBookings.length} expired bookings, successfully cancelled ${cancelledCount} bookings.`,
         expiredCount: expiredBookings.length,
-        cancelledCount: cancelledCount
+        cancelledCount: cancelledCount,
+        pendingBookings: pendingBookingsWithTime
       });
     } else {
-      return res.status(500).json({
-        message: `Checked expired bookings. Found ${expiredBookings.length} expired bookings, but only cancelled ${cancelledCount} bookings.`,
-        expiredCount: expiredBookings.length,
-        cancelledCount: cancelledCount,
+      return res.status(200).json({
+        message: 'No expired bookings found.',
+        expiredCount: 0,
+        cancelledCount: 0,
+        pendingBookings: pendingBookingsWithTime,
         errors: errorMessages
       });
     }

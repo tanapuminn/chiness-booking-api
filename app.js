@@ -10,6 +10,7 @@ const ApiError = require('./src/utils/ApiError.js');
 const bookingRoutes = require('./src/routes/bookingRoutes');
 const tableRoutes = require('./src/routes/tableRoutes');
 const zoneRoutes = require('./src/routes/zoneRoutes');
+const healthRoutes = require('./src/middleware/health-check.js');
 
 dotenv.config();
 connectDB();
@@ -28,6 +29,7 @@ app.use(bodyParser.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+app.use('/api', healthRoutes.default);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/zones', zoneRoutes);
 app.use('/api/tables', tableRoutes);
