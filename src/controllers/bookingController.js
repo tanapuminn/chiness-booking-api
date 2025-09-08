@@ -752,8 +752,13 @@ const exportBookingsToXlsx = async (req, res, next) => {
     XLSX.utils.book_append_sheet(wb, ws, 'Bookings');
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     const now = new Date();
-    const timestamp = now.getTime();
-    const filename = `booking_report_${timestamp}.xlsx`;
+    const formattedDateTime = now.getFullYear().toString() +
+    (now.getMonth() + 1).toString().padStart(2, '0') +
+    now.getDate().toString().padStart(2, '0') + '_' +
+    now.getHours().toString().padStart(2, '0') +
+    now.getMinutes().toString().padStart(2, '0') +
+    now.getSeconds().toString().padStart(2, '0');
+    const filename = `booking_report_${formattedDateTime}.xlsx`;
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.send(buf);
