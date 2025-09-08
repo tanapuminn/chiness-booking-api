@@ -298,7 +298,7 @@ const createBooking = async (req, res, next) => {
     }
 
     // set timeout for payment (20 minutes)
-    const paymentDeadline = new Date(Date.now() + 2 * 60 * 1000);
+    const paymentDeadline = new Date(Date.now() + 20 * 60 * 1000);
 
     const booking = new bookingModel({
       id: `BK${Date.now()}`,
