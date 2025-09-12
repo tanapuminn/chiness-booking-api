@@ -2,20 +2,12 @@ const bookingModel = require('../models/bookingModel.js');
 const tablePositionModel = require('../models/tablePositionModel.js');
 const zoneConfigModel = require('../models/zoneConfigModel.js');
 const mongoose = require('mongoose');
-const { v2: cloudinary } = require('cloudinary');
 const fs = require('fs');
 const dotenv = require('dotenv');
 const axios = require('axios');
 const XLSX = require('xlsx');
 dotenv.config();
 const ApiError = require('../utils/ApiError.js');
-
-// ตั้งค่า Cloudinary (แนะนำให้ใช้ .env)
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
 
 // ดึงข้อมูลการจองทั้งหมด
 const getBookings = async (req, res, next) => {
@@ -383,14 +375,13 @@ const confirmPayment = async (req, res, next) => {
     // Step 1: ตรวจสอบ slip ด้วย SlipOK
     const branchId = process.env.SLIPOK_BRANCH_ID;
     const apiKey = process.env.SLIPOK_API_KEY;
-    const path = req.file.path;
-    const buffer = fs.readFileSync(path);
+    const url = req.file.path;
 
     try {
       const slipokRes = await axios.post(
         `https://api.slipok.com/api/line/apikey/${branchId}`,
         {
-          files: buffer,
+          url,
           log: true,
           amount: req.body.amount
         },
@@ -406,11 +397,9 @@ const confirmPayment = async (req, res, next) => {
       console.log('SlipOK success:', slipData);
     } catch (err) {
       // ถ้า slip ไม่ถูกต้อง
-      const errorData = err.response.data;
-      console.log(err.response.data);
+      const errorData = err.response?.data;
+      console.log('SlipOK error:', err.response?.data);
 
-      // ลบไฟล์ local
-      fs.unlinkSync(path);
 
       return res.status(400).json({
         message: errorData?.message || 'Invalid slip',
@@ -419,17 +408,7 @@ const confirmPayment = async (req, res, next) => {
     }
 
     // Step 2: อัปโหลด slip ไปยัง Cloudinary
-    let paymentProofUrl = null;
-    try {
-      const result = await cloudinary.uploader.upload(path, {
-        folder: 'booking_payment_proofs',
-      });
-      paymentProofUrl = result.secure_url;
-      // ลบไฟล์ local หลังอัปโหลด
-      fs.unlinkSync(path);
-    } catch (err) {
-      throw new Error('Failed to upload image to Cloudinary: ' + err.message);
-    }
+    const paymentProofUrl = req.file.path; // URL จาก Cloudinary
 
     // Step 3: อัปเดตการจอง
     booking.status = 'confirmed';
