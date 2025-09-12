@@ -18,6 +18,7 @@ const bookingSchema = new mongoose.Schema({
         tableId: { type: Number, required: true },
         seatNumber: { type: Number, required: true },
         zone: { type: String, required: true },
+        tableName: { type: String, required: true }
     }],
     notes: { 
         type: String 
@@ -28,8 +29,8 @@ const bookingSchema = new mongoose.Schema({
     },
     status: { 
         type: String, 
-        enum: ['confirmed', 'cancelled'], 
-        default: 'confirmed' 
+        enum: ['pending_payment', 'confirmed', 'cancelled', 'payment_timeout'], 
+        default: 'pending_payment' 
     },
     bookingDate: { 
         type: String, 
@@ -37,6 +38,10 @@ const bookingSchema = new mongoose.Schema({
     },
     paymentProof: { 
         type: String 
+    },
+    paymentDeadline: {
+        type: Date,
+        required: true
     },
     createdAt: { 
         type: Date, 
