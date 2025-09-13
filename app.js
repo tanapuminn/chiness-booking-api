@@ -13,7 +13,7 @@ const zoneRoutes = require('./src/routes/zoneRoutes');
 const healthRoutes = require('./src/middleware/health-check.js');
 
 dotenv.config();
-connectDB();
+// connectDB();
 const app = express();
 
 // app.use(cors());
@@ -25,7 +25,7 @@ app.use(
   })
 );
 app.use(express.json());
-app.use(bodyParser.json());
+// app.use(bodyParser.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -54,8 +54,29 @@ app.use((error, req, res, next) => {
   });
 });
 
-app.listen(process.env.PORT, () => {
-  console.log(`Server is running on port ${process.env.PORT}`);
-  // เริ่มต้น booking scheduler
-  startBookingScheduler();
+const PORT = process.env.PORT || 8080;
+
+// ✅ รอ DB ก่อนค่อย start server + scheduler
+(async () => {
+  try {
+    await connectDB(); // ต้อง return promise ภายในเรียก mongoose.connect(...)
+
+    app.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
+      // เริ่ม scheduler หลัง DB connect แล้วเท่านั้น
+      startBookingScheduler?.();
+    });
+  } catch (err) {
+    console.error('❌ Failed to connect DB, server not started:', err);
+    process.exit(1);
+  }
+})();
+
+// ป้องกัน error ที่ไม่ถูกจับ
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  process.exit(1);
 });
