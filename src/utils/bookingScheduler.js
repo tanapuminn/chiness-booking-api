@@ -1,8 +1,21 @@
+const cron = require('node-cron');
 const bookingController = require('../controllers/bookingController.js');
 
-// ตรวจสอบการจองที่หมดเวลาทุก 1 นาที
+// ตรวจสอบการจองที่หมดเวลาทุก 6 นาที
 const startBookingScheduler = () => {
   console.log('Starting booking scheduler...');
+
+  // ทำงานทุก ๆ 6 นาที
+  cron.schedule('*/6 * * * *', async () => {
+    try {
+      //add time log for debugging
+      const now = new Date();
+      console.log(`Booking scheduler running at ${now.toISOString()}`);
+      await bookingController.checkExpiredBookings();
+    } catch (error) {
+      console.error('Error in booking scheduler:', error);
+    }
+  });
   
   // ตรวจสอบทันทีเมื่อเริ่มต้น
   // bookingController.checkAndCancelExpiredBookings();
