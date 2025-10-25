@@ -437,9 +437,9 @@ const checkAndCancelExpiredBookings = async () => {
     const expiredBookings = await bookingModel.find({
       status: 'pending_payment',
       paymentDeadline: { $lt: now }
-    });
+    }).lean();
 
-    console.log(`Found ${expiredBookings.length} expired bookings`);
+    console.log(`Found ${expiredBookings.length} expired bookings==`);
 
     for (const booking of expiredBookings) {
       const session = await mongoose.startSession();
@@ -749,6 +749,7 @@ const exportBookingsToXlsx = async (req, res, next) => {
 // ตรวจสอบการจองที่หมดเวลาทันที (API endpoint)
 const checkExpiredBookings = async (req, res, next) => {
   try {
+    console.log('Checking for expired bookings...');
     const now = new Date();
     
     // Find expired bookings
