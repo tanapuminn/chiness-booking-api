@@ -10,6 +10,8 @@ const ApiError = require('./src/utils/ApiError.js');
 const bookingRoutes = require('./src/routes/bookingRoutes');
 const tableRoutes = require('./src/routes/tableRoutes');
 const zoneRoutes = require('./src/routes/zoneRoutes');
+const authRoutes = require('./src/routes/authRoutes');
+const settingsRoutes = require('./src/routes/settingsRoutes');
 const healthRoutes = require('./src/middleware/health-check.js');
 
 dotenv.config();
@@ -17,19 +19,34 @@ dotenv.config();
 const app = express();
 
 // app.use(cors());
-app.use(
-  cors({
-    origin: '*',
-    methods: ['POST', 'GET', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    credentials: true,
-  })
-);
+const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:3000')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error(`CORS not allowed for origin: ${origin}`));
+  },
+  methods: ['POST', 'GET', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 // app.use(bodyParser.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.use('/api', healthRoutes.default);
+app.use('/api/auth', authRoutes);
+app.use('/api/settings', settingsRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/zones', zoneRoutes);
 app.use('/api/tables', tableRoutes);

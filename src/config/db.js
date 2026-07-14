@@ -1,4 +1,5 @@
 const mongoose = require('mongoose')
+const dns = require('dns')
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -18,6 +19,17 @@ const connectDB = async () => {
         throw new Error('MONGODB_URI missing');
     }
 
+    if (uri.startsWith('mongodb+srv://')) {
+        const dnsServers = (process.env.MONGODB_DNS_SERVERS || '1.1.1.1,8.8.8.8')
+            .split(',')
+            .map((server) => server.trim())
+            .filter(Boolean);
+
+        if (dnsServers.length > 0) {
+            dns.setServers(dnsServers);
+        }
+    }
+
     try {
         await mongoose.connect(uri, {
             // ช่วยลดโอกาส server selection ช้า/ค้าง
@@ -29,6 +41,14 @@ const connectDB = async () => {
         });
 
         console.log('✅ MongoDB connected');
+
+        // Drop legacy username_1 index if it still exists after schema migration
+        try {
+            await mongoose.connection.collection('users').dropIndex('username_1');
+            console.log('🧹 Dropped legacy index: username_1');
+        } catch (e) {
+            // index ไม่มีแล้ว ข้ามได้เลย
+        }
 
         // Log เหตุการณ์สำคัญไว้ตามรอยง่าย
         mongoose.connection.on('error', (err) => {

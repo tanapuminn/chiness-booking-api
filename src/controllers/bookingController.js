@@ -1,4 +1,5 @@
 const bookingModel = require('../models/bookingModel.js');
+const userModel = require('../models/userModel.js');
 const tablePositionModel = require('../models/tablePositionModel.js');
 const zoneConfigModel = require('../models/zoneConfigModel.js');
 const mongoose = require('mongoose');
@@ -8,6 +9,7 @@ const axios = require('axios');
 const XLSX = require('xlsx');
 dotenv.config();
 const ApiError = require('../utils/ApiError.js');
+const { sendTicketEmail } = require('../services/emailService.js');
 
 // ดึงข้อมูลการจองทั้งหมด
 const getBookings = async (req, res, next) => {
@@ -417,9 +419,25 @@ const confirmPayment = async (req, res, next) => {
 
     await session.commitTransaction();
     console.log(`Payment confirmed for booking ${id}`);
+
+    const confirmedBooking = booking.toObject();
+    let ticketEmailStatus = { skipped: true, reason: 'not_attempted' };
+
+    try {
+      const user = await userModel.findOne({ phone: booking.phone }).select('email').lean();
+      ticketEmailStatus = await sendTicketEmail({
+        to: user?.email,
+        booking: confirmedBooking,
+      });
+    } catch (emailError) {
+      ticketEmailStatus = { sent: false, error: emailError.message };
+      console.error(`Failed to send ticket email for booking ${id}:`, emailError);
+    }
+
     res.json({
-      ...booking.toObject(),
-      message: 'Payment confirmed successfully.'
+      ...confirmedBooking,
+      message: 'Payment confirmed successfully.',
+      ticketEmailStatus,
     });
   } catch (error) {
     console.error('Payment confirmation failed:', error.message);
@@ -832,8 +850,129 @@ const checkExpiredBookings = async (req, res, next) => {
   }
 };
 
+// ดึงการจองของ user ที่ login อยู่ (เทียบจาก phone ใน JWT)
+const getMyBookings = async (req, res, next) => {
+  try {
+    const bookings = await bookingModel
+      .find({ phone: req.user.phone })
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json(bookings);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ดึงข้อมูลสถิติการจอง
+const getBookingStats = async (req, res, next) => {
+  try {
+    const stats = await bookingModel.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalBookings: { $sum: 1 },
+          confirmedBookings: {
+            $sum: { $cond: [{ $eq: ["$status", "confirmed"] }, 1, 0] }
+          },
+          pendingBookings: {
+            $sum: { $cond: [{ $eq: ["$status", "pending_payment"] }, 1, 0] }
+          },
+          cancelledBookings: {
+            $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] }
+          },
+          timeoutBookings: {
+            $sum: { $cond: [{ $eq: ["$status", "payment_timeout"] }, 1, 0] }
+          },
+          totalRevenue: {
+            $sum: { $cond: [{ $eq: ["$status", "confirmed"] }, "$totalPrice", 0] }
+          },
+          totalSeats: {
+            $sum: { 
+              $cond: [
+                { $eq: ["$status", "confirmed"] }, 
+                { 
+                  $cond: [
+                    { $ne: ["$seats", null] },
+                    { $size: { $ifNull: ["$seats", []] } },
+                    0
+                  ]
+                }, 
+                0
+              ] 
+            }
+          }
+        }
+      }
+    ]);
+
+    // ดึงข้อมูลสถิติแยกตามโซน - เฉพาะจำนวนที่นั่ง
+    const zoneStats = await bookingModel.aggregate([
+      {
+        $match: { status: "confirmed" }
+      },
+      {
+        $unwind: "$seats"
+      },
+      {
+        $group: {
+          _id: "$seats.zone",
+          totalSeats: { $sum: 1 },
+          totalRevenue: { $sum: 0 } // ไม่คำนวณ revenue ตามโซน เพราะซับซ้อน
+        }
+      }
+    ]);
+
+    // ดึงข้อมูลสถิติรายเดือน (6 เดือนล่าสุด)
+    const monthlyStats = await bookingModel.aggregate([
+      {
+        $match: { status: "confirmed" }
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$createdAt" },
+            month: { $month: "$createdAt" }
+          },
+          totalBookings: { $sum: 1 },
+          totalRevenue: { $sum: "$totalPrice" },
+          totalSeats: { 
+            $sum: { 
+              $size: { $ifNull: ["$seats", []] }
+            } 
+          }
+        }
+      },
+      {
+        $sort: { "_id.year": -1, "_id.month": -1 }
+      },
+      {
+        $limit: 6
+      }
+    ]);
+
+    const result = {
+      overall: stats[0] || {
+        totalBookings: 0,
+        confirmedBookings: 0,
+        pendingBookings: 0,
+        cancelledBookings: 0,
+        timeoutBookings: 0,
+        totalRevenue: 0,
+        totalSeats: 0
+      },
+      byZone: zoneStats,
+      monthly: monthlyStats
+    };
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getBookings,
+  getMyBookings,
   getBookingById,
   createBooking,
   confirmPayment,
@@ -842,5 +981,6 @@ module.exports = {
   updateBooking,
   updateBookingStatus,
   deleteBooking,
-  exportBookingsToXlsx
+  exportBookingsToXlsx,
+  getBookingStats
 };

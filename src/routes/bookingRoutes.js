@@ -1,5 +1,6 @@
 const express = require('express');
 const bookingCtr = require('../controllers/bookingController');
+const { authenticate } = require('../middleware/authMiddleware');
 const multer = require('multer');
 const path = require('path');
 const dotenv = require('dotenv');
@@ -47,6 +48,8 @@ const upload = multer({
 });
 
 router.get('/', bookingCtr.getBookings);
+router.get('/stats', bookingCtr.getBookingStats);
+router.get('/my', authenticate, bookingCtr.getMyBookings); // การจองของ user ที่ login
 router.get('/:id', bookingCtr.getBookingById);
 router.post('/', bookingCtr.createBooking); // ไม่ต้องอัปโหลดไฟล์ตอนสร้างการจอง
 router.post('/:id/confirm-payment', upload.single('paymentProof'), bookingCtr.confirmPayment); // ยืนยันการชำระเงิน
