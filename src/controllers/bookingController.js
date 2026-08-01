@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const bookingModel = require('../models/bookingModel.js');
 const userModel = require('../models/userModel.js');
 const tablePositionModel = require('../models/tablePositionModel.js');
@@ -6,10 +7,48 @@ const mongoose = require('mongoose');
 const fs = require('fs');
 const dotenv = require('dotenv');
 const axios = require('axios');
-const XLSX = require('xlsx');
+const ExcelJS = require('exceljs');
 dotenv.config();
 const ApiError = require('../utils/ApiError.js');
 const { sendTicketEmail } = require('../services/emailService.js');
+
+const parseAndValidateSeats = (rawSeats) => {
+  let parsedSeats;
+  try {
+    parsedSeats = Array.isArray(rawSeats) ? rawSeats : JSON.parse(rawSeats);
+  } catch {
+    throw new ApiError('Invalid seats format', 400);
+  }
+
+  if (!Array.isArray(parsedSeats) || parsedSeats.length === 0 || parsedSeats.length > 100) {
+    throw new ApiError('Seats must contain between 1 and 100 items', 400);
+  }
+
+  const seen = new Set();
+  return parsedSeats.map((seat) => {
+    const tableId = Number(seat?.tableId);
+    const seatNumber = Number(seat?.seatNumber);
+    const zone = String(seat?.zone || '').trim();
+
+    if (!Number.isInteger(tableId) || tableId <= 0 || !Number.isInteger(seatNumber) || seatNumber < 1 || seatNumber > 9 || !zone) {
+      throw new ApiError('Each seat must have a valid tableId, seatNumber, and zone', 400);
+    }
+
+    const key = `${tableId}-${seatNumber}-${zone}`;
+    if (seen.has(key)) {
+      throw new ApiError(`Duplicate seat selection: ${tableId}-${seatNumber}`, 400);
+    }
+    seen.add(key);
+
+    return { ...seat, tableId, seatNumber, zone };
+  });
+};
+const isBookingOwner = (booking, req) => {
+  if (req.user?.role === 'admin') return true;
+  if (booking.userId) return String(booking.userId) === String(req.user?.id);
+  // Backward-compatible fallback for bookings created before userId existed.
+  return Boolean(req.user?.phone) && booking.phone === req.user.phone;
+};
 
 // ดึงข้อมูลการจองทั้งหมด
 const getBookings = async (req, res, next) => {
@@ -93,7 +132,7 @@ const getBookingById = async (req, res, next) => {
     const { id } = req.params;
     const [booking] = await bookingModel.aggregate([
       {
-        $match: { id: id }
+        $match: { id: id, ...(req.user.role !== 'admin' ? { $or: [{ userId: req.user.id }, { userId: { $exists: false }, phone: req.user.phone }] } : {}) }
       },
       {
         $lookup: {
@@ -174,22 +213,22 @@ const createBooking = async (req, res, next) => {
 
   try {
     const { customerName, phone, seats, notes, bookingDate } = req.body;
-    let parsedSeats;
-    try {
-      parsedSeats = JSON.parse(seats);
-    } catch (error) {
-      throw new Error('Invalid seats format');
-    }
-    console.log('body:: ', req.body);
+    const parsedSeats = parseAndValidateSeats(seats);
+    const normalizedCustomerName = String(customerName || '').trim();
+    const normalizedPhone = String(phone || '').trim();
+    const normalizedBookingDate = new Date(bookingDate);
 
-    if (!customerName || !phone || !parsedSeats || !bookingDate) {
-      throw new Error('Missing required fields: customerName, phone, seats, or bookingDate');
+    if (!normalizedCustomerName || normalizedCustomerName.length > 120 || !/^0\d{9}$/.test(normalizedPhone)) {
+      throw new ApiError('Invalid customer name or phone number', 400);
     }
 
-    if (!Array.isArray(parsedSeats) || parsedSeats.length === 0) {
-      throw new Error('Seats must be a non-empty array');
+    if (Number.isNaN(normalizedBookingDate.getTime())) {
+      throw new ApiError('Invalid booking date', 400);
     }
-    console.log('Parsed seats:', parsedSeats);
+
+    if (notes !== undefined && notes !== null && String(notes).length > 500) {
+      throw new ApiError('Notes must be 500 characters or fewer', 400);
+    }
 
     const tableGroups = {};
     parsedSeats.forEach((seat) => {
@@ -215,6 +254,12 @@ const createBooking = async (req, res, next) => {
       if (!zoneConfig) {
         throw new Error(`Zone ${group.zone} not found`);
       }
+      if (!zoneConfig.isActive) {
+        throw new ApiError(`Zone ${group.zone} is not active`, 409);
+      }
+      if (!zoneConfig.allowIndividualSeatBooking && group.seats.length !== 9) {
+        throw new ApiError(`Zone ${group.zone} requires booking the full table`, 400);
+      }
 
       // Book each seat in the group
       for (const seat of group.seats) {
@@ -229,6 +274,9 @@ const createBooking = async (req, res, next) => {
 
         if (!table) {
           throw new Error(`Table ${seat.tableId} in zone ${seat.zone} not found`);
+        }
+        if (!table.isActive) {
+          throw new ApiError(`Table ${seat.tableId} is not active`, 409);
         }
 
         // Add table name to seat object
@@ -295,13 +343,14 @@ const createBooking = async (req, res, next) => {
     const paymentDeadline = new Date(Date.now() + 20 * 60 * 1000);
 
     const booking = new bookingModel({
-      id: `BK${Date.now()}`,
-      customerName,
-      phone,
+      id: `BK${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+      customerName: normalizedCustomerName,
+      phone: normalizedPhone,
+      userId: req.user.id,
       seats: seatsToBook, // Using seatsToBook which includes tableName
       notes,
       totalPrice,
-      bookingDate,
+      bookingDate: normalizedBookingDate.toISOString(),
       status: 'pending_payment',
       paymentDeadline,
     });
@@ -342,7 +391,16 @@ const confirmPayment = async (req, res, next) => {
       throw new Error('Booking not found');
     }
 
+    if (!isBookingOwner(booking, req)) {
+      throw new ApiError('You do not have access to this booking', 403);
+    }
+
     // ตรวจสอบสถานะการจอง
+    if (booking.status === 'confirmed') {
+      await session.commitTransaction();
+      return res.json({ ...booking.toObject(), message: 'Payment already confirmed.' });
+    }
+
     if (booking.status !== 'pending_payment') {
       throw new Error(`Cannot confirm payment for booking with status: ${booking.status}`);
     }
@@ -378,6 +436,7 @@ const confirmPayment = async (req, res, next) => {
     const branchId = process.env.SLIPOK_BRANCH_ID;
     const apiKey = process.env.SLIPOK_API_KEY;
     const url = req.file.path;
+    let slipData;
 
     try {
       const slipokRes = await axios.post(
@@ -385,28 +444,42 @@ const confirmPayment = async (req, res, next) => {
         {
           url,
           log: true,
-          amount: req.body.amount
+          // Always verify against the server-calculated booking total.
+          amount: Number(booking.totalPrice),
         },
         {
           headers: {
-            "x-authorization": apiKey,
-            "Content-Type": "multipart/form-data",
+            'x-authorization': apiKey,
           },
+          timeout: 15000,
         }
       );
-      // ถ้า success จะได้ slipData
-      const slipData = slipokRes.data.data;
-      console.log('SlipOK success:', slipData);
+
+      slipData = slipokRes.data?.data;
+      const verifiedAmount = Number(slipData?.amount);
+      const transactionRef = String(slipData?.transRef || '').trim();
+
+      if (!transactionRef || !Number.isFinite(verifiedAmount) || Math.abs(verifiedAmount - Number(booking.totalPrice)) > 0.005) {
+        throw new ApiError('Payment amount or transaction reference could not be verified', 400);
+      }
+
+      const duplicatePayment = await bookingModel.findOne({ paymentTransactionRef: transactionRef }).session(session);
+      if (duplicatePayment && duplicatePayment.id !== booking.id) {
+        throw new ApiError('This payment slip has already been used', 409);
+      }
+
+      booking.paymentTransactionRef = transactionRef;
+      booking.paymentAmount = verifiedAmount;
+      booking.paymentVerifiedAt = new Date();
     } catch (err) {
-      // ถ้า slip ไม่ถูกต้อง
+      if (err instanceof ApiError) throw err;
+
       const errorData = err.response?.data;
-      console.log('SlipOK error:', err.response?.data);
-
-
-      return res.status(400).json({
-        message: errorData?.message || 'Invalid slip',
-        code: errorData?.code,
-      });
+      const errorCode = errorData?.code;
+      const message = errorCode === 1012
+        ? 'This payment slip has already been used'
+        : errorData?.message || 'Invalid slip';
+      throw new ApiError(message, errorCode === 1012 ? 409 : 400);
     }
 
     // Step 2: อัปโหลด slip ไปยัง Cloudinary
@@ -424,7 +497,9 @@ const confirmPayment = async (req, res, next) => {
     let ticketEmailStatus = { skipped: true, reason: 'not_attempted' };
 
     try {
-      const user = await userModel.findOne({ phone: booking.phone }).select('email').lean();
+      const user = booking.userId
+        ? await userModel.findById(booking.userId).select('email').lean()
+        : await userModel.findOne({ phone: booking.phone }).select('email').lean();
       ticketEmailStatus = await sendTicketEmail({
         to: user?.email,
         booking: confirmedBooking,
@@ -510,18 +585,24 @@ const updateBooking = async (req, res, next) => {
       throw new Error('Booking not found');
     }
 
+    if (!isBookingOwner(booking, req)) {
+      throw new ApiError('You do not have access to this booking', 403);
+    }
+
+    if (req.user.role !== 'admin') {
+      const allowedCustomerUpdates = ['status'];
+      const updateKeys = Object.keys(updates);
+      if (updateKeys.some((key) => !allowedCustomerUpdates.includes(key)) || updates.status !== 'cancelled') {
+        throw new ApiError('Customers may only cancel their own booking', 403);
+      }
+      if (booking.status !== 'pending_payment') {
+        throw new ApiError('Only pending bookings can be cancelled by the customer', 409);
+      }
+    }
+
     // ถ้ามีการอัปเดต seats
     if (updates.seats) {
-      let parsedSeats;
-      try {
-        parsedSeats = Array.isArray(updates.seats) ? updates.seats : JSON.parse(updates.seats);
-      } catch (error) {
-        throw new Error('Invalid seats format');
-      }
-
-      if (!Array.isArray(parsedSeats)) {
-        throw new Error('Seats must be an array');
-      }
+      const parsedSeats = parseAndValidateSeats(updates.seats);
 
       // รีเซ็ต isBooked สำหรับที่นั่งเดิม
       for (const seat of booking.seats) {
@@ -538,6 +619,9 @@ const updateBooking = async (req, res, next) => {
         if (!table) {
           throw new Error(`Table ${seat.tableId} in zone ${seat.zone} not found`);
         }
+        if (!table.isActive) {
+          throw new ApiError(`Table ${seat.tableId} is not active`, 409);
+        }
         const tableSeat = table.seats.find((s) => s.seatNumber === seat.seatNumber);
         if (!tableSeat) {
           throw new Error(`Seat ${seat.seatNumber} not found in table ${seat.tableId} in zone ${seat.zone}`);
@@ -546,9 +630,11 @@ const updateBooking = async (req, res, next) => {
           throw new Error(`Seat ${seat.seatNumber} in table ${seat.tableId} in zone ${seat.zone} is already booked`);
         }
 
+        seat.tableName = table.name;
+
         await tablePositionModel.updateOne(
           { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
-          { $set: { 'seats.$.isBooked': false } },
+          { $set: { 'seats.$.isBooked': true } },
           { session }
         );
       }
@@ -569,6 +655,12 @@ const updateBooking = async (req, res, next) => {
         if (!zoneConfig) {
           throw new Error(`Zone ${group.zone} not found`);
         }
+        if (!zoneConfig.isActive) {
+          throw new ApiError(`Zone ${group.zone} is not active`, 409);
+        }
+        if (!zoneConfig.allowIndividualSeatBooking && group.seats.length !== 9) {
+          throw new ApiError(`Zone ${group.zone} requires booking the full table`, 400);
+        }
 
         if (!zoneConfig.allowIndividualSeatBooking || group.seats.length === 9) {
           totalPrice += zoneConfig.tablePrice;
@@ -578,17 +670,10 @@ const updateBooking = async (req, res, next) => {
       }
       updates.totalPrice = totalPrice;
       updates.seats = parsedSeats;
-    } else if (booking) {
-      for (const seat of booking.seats) {
-        await tablePositionModel.updateOne(
-          { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
-          { $set: { 'seats.$.isBooked': false } },
-          { session }
-        );
-      }
     }
 
-    // อัปเดต booking
+    // Update booking
+
     const updatedBooking = await bookingModel.findOneAndUpdate(
       { id: id },
       { $set: updates },
@@ -744,10 +829,17 @@ const exportBookingsToXlsx = async (req, res, next) => {
       "หลักฐานการชำระเงิน": b.paymentProof || '',
       หมายเหตุ: b.notes || ''
     }));
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Bookings');
-    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Bookings');
+    worksheet.columns = Object.keys(data[0] || {}).map((header) => ({
+      header,
+      key: header,
+      width: Math.min(Math.max(header.length + 4, 14), 40)
+    }));
+    worksheet.addRows(data);
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.views = [{ state: 'frozen', ySplit: 1 }];
+    const buf = await workbook.xlsx.writeBuffer();
     const now = new Date();
     const formattedDateTime = now.getFullYear().toString() +
     (now.getMonth() + 1).toString().padStart(2, '0') +
@@ -800,11 +892,22 @@ const checkExpiredBookings = async (req, res, next) => {
 
       try {
         // อัปเดตสถานะเป็น payment_timeout
-        booking.status = 'payment_timeout';
-        await booking.save({ session });
+        const expiredBooking = await bookingModel.findOneAndUpdate(
+          {
+            id: booking.id,
+            status: 'pending_payment',
+            paymentDeadline: { $lt: now },
+          },
+          { $set: { status: 'payment_timeout' } },
+          { new: true, session }
+        );
 
-        // รีเซ็ตที่นั่ง
-        for (const seat of booking.seats) {
+        if (!expiredBooking) {
+          await session.commitTransaction();
+          continue;
+        }
+
+        for (const seat of expiredBooking.seats) {
           await tablePositionModel.updateOne(
             { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
             { $set: { 'seats.$.isBooked': false } },
@@ -813,12 +916,12 @@ const checkExpiredBookings = async (req, res, next) => {
         }
 
         await session.commitTransaction();
-        console.log(`Cancelled expired booking: ${booking.id}`);
+        console.log(`Cancelled expired booking: ${expiredBooking.id}`);
         cancelledCount++;
       } catch (error) {
         await session.abortTransaction();
-        console.error(`Failed to cancel expired booking ${booking.id}:`, error);
-        errorMessages.push(`Failed to cancel booking ${booking.id}: ${error.message}`);
+        console.error(`Failed to cancel expired booking ${expiredBooking.id}:`, error);
+        errorMessages.push(`Failed to cancel booking ${expiredBooking.id}: ${error.message}`);
       } finally {
         session.endSession();
       }
@@ -854,7 +957,7 @@ const checkExpiredBookings = async (req, res, next) => {
 const getMyBookings = async (req, res, next) => {
   try {
     const bookings = await bookingModel
-      .find({ phone: req.user.phone })
+      .find({ $or: [{ userId: req.user.id }, { userId: { $exists: false }, phone: req.user.phone }] })
       .sort({ createdAt: -1 })
       .lean();
     res.json(bookings);
@@ -971,6 +1074,8 @@ const getBookingStats = async (req, res, next) => {
 };
 
 module.exports = {
+  parseAndValidateSeats,
+  isBookingOwner,
   getBookings,
   getMyBookings,
   getBookingById,

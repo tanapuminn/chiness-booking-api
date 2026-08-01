@@ -1,6 +1,7 @@
 const mongoose = require('mongoose')
 const dns = require('dns')
 const dotenv = require('dotenv');
+const logger = require('../utils/logger');
 dotenv.config();
 
 const connectDB = async () => {
@@ -31,14 +32,20 @@ const connectDB = async () => {
     }
 
     try {
-        await mongoose.connect(uri, {
-            // ช่วยลดโอกาส server selection ช้า/ค้าง
-            serverSelectionTimeoutMS: 30000, // 30s เลือก primary/secondary ไม่ได้ภายในเวลานี้ให้ error
-            socketTimeoutMS: 45000,          // ตัดการเชื่อมต่อถ้า idle นานเกินไป
-            // ถ้าเป็น Atlas และอยากปิด autoIndex ในโปรดักชัน:
-            // autoIndex: false,
-            // maxPoolSize: 10, // ปรับตามโหลด
-        });
+        const maxAttempts = Math.max(1, Number(process.env.MONGODB_CONNECT_RETRIES || 3));
+        let lastError;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            try {
+                await mongoose.connect(uri, { serverSelectionTimeoutMS: 30000, socketTimeoutMS: 45000 });
+                lastError = null;
+                break;
+            } catch (error) {
+                lastError = error;
+                logger.warn('mongodb_connect_retry', { attempt, maxAttempts, error: logger.serializeError(error) });
+                if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * (2 ** (attempt - 1)), 5000)));
+            }
+        }
+        if (lastError) throw lastError;
 
         console.log('✅ MongoDB connected');
 
@@ -52,7 +59,7 @@ const connectDB = async () => {
 
         // Log เหตุการณ์สำคัญไว้ตามรอยง่าย
         mongoose.connection.on('error', (err) => {
-            console.error('Mongoose connection error:', err);
+            logger.error('mongodb_connection_error', { error: logger.serializeError(err) });
         });
 
         mongoose.connection.on('disconnected', () => {
@@ -60,12 +67,6 @@ const connectDB = async () => {
         });
 
         // ปิดเชื่อมต่อให้เรียบร้อยเมื่อ process ถูก kill
-        process.on('SIGINT', async () => {
-            await mongoose.connection.close();
-            console.log('MongoDB connection closed due to app termination');
-            process.exit(0);
-        });
-
         return mongoose.connection; // เผื่ออยากเช็ค readyState ที่ฝั่ง caller
     } catch (error) {
         // โยน error ออกไป ให้ app.js ตัดสินใจไม่ start server

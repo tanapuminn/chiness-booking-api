@@ -14,6 +14,11 @@ const bookingSchema = new mongoose.Schema({
         type: String, 
         required: true 
     },
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'user',
+        index: true
+    },
     seats: [{
         tableId: { type: Number, required: true },
         seatNumber: { type: Number, required: true },
@@ -38,6 +43,18 @@ const bookingSchema = new mongoose.Schema({
     },
     paymentProof: { 
         type: String 
+    },
+    paymentTransactionRef: {
+        type: String,
+        unique: true,
+        sparse: true,
+        trim: true
+    },
+    paymentAmount: {
+        type: Number
+    },
+    paymentVerifiedAt: {
+        type: Date
     },
     paymentDeadline: {
         type: Date,

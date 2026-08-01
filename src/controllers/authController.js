@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const userModel = require('../models/userModel');
+const { setAuthCookie, clearAuthCookie } = require('../utils/authCookie');
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -131,7 +132,8 @@ const register = async (req, res, next) => {
 
     const user = await userModel.create(userData);
     const token = signToken(user);
-    res.status(201).json({ token, user: formatUser(user) });
+    setAuthCookie(res, token);
+    res.status(201).json({ user: formatUser(user) });
   } catch (error) {
     next(error);
   }
@@ -160,7 +162,8 @@ const login = async (req, res, next) => {
     }
 
     const token = signToken(user);
-    res.json({ token, user: formatUser(user) });
+    setAuthCookie(res, token);
+    res.json({ user: formatUser(user) });
   } catch (error) {
     next(error);
   }
@@ -196,7 +199,8 @@ const googleLogin = async (req, res, next) => {
     }
 
     const token = signToken(user);
-    res.json({ token, user: formatUser(user) });
+    setAuthCookie(res, token);
+    res.json({ user: formatUser(user) });
   } catch (error) {
     next(error);
   }
@@ -238,10 +242,15 @@ const updateProfile = async (req, res, next) => {
     await user.save();
 
     const token = signToken(user);
-    res.json({ token, user: formatUser(user) });
+    setAuthCookie(res, token);
+    res.json({ user: formatUser(user) });
   } catch (error) {
     next(error);
   }
+};
+const logout = async (req, res) => {
+  clearAuthCookie(res);
+  res.status(204).send();
 };
 const me = async (req, res, next) => {
   try {
@@ -254,4 +263,4 @@ const me = async (req, res, next) => {
     next(error);
   }
 };
-module.exports = { register, login, googleLogin, updateProfile, me };
+module.exports = { register, login, googleLogin, updateProfile, me, logout };
