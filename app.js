@@ -71,6 +71,26 @@ app.use(express.urlencoded({
 }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+// Vercel invokes the exported Express app directly, so it does not enter
+// startServer(). Connect lazily before handling API requests in that runtime.
+let databaseConnectionPromise;
+if (process.env.VERCEL) {
+  app.use(async (req, res, next) => {
+    try {
+      if (mongoose.connection.readyState !== 1) {
+        databaseConnectionPromise ??= connectDB().catch((error) => {
+          databaseConnectionPromise = undefined;
+          throw error;
+        });
+        await databaseConnectionPromise;
+      }
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
+}
+
 app.use('/api', healthRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/settings', settingsRoutes);
@@ -139,7 +159,11 @@ if (require.main === module) {
   process.once('SIGTERM', () => shutdown('SIGTERM').then(() => process.exit(0)));
 }
 
-module.exports = { app, startServer, shutdown };
+// Export the Express application itself for Vercel's Node runtime. Attach the
+// named properties to preserve the existing CommonJS imports used by tests.
+app.startServer = startServer;
+app.shutdown = shutdown;
+module.exports = app;
 
 
 

@@ -1,5 +1,4 @@
 const mongoose = require('mongoose')
-const dns = require('dns')
 const dotenv = require('dotenv');
 const logger = require('../utils/logger');
 dotenv.config();
@@ -18,17 +17,6 @@ const connectDB = async () => {
         console.error('❌ MONGODB_URI is not set in environment variables');
         // โยน error เพื่อให้ app.js หยุด start server
         throw new Error('MONGODB_URI missing');
-    }
-
-    if (uri.startsWith('mongodb+srv://')) {
-        const dnsServers = (process.env.MONGODB_DNS_SERVERS || '1.1.1.1,8.8.8.8')
-            .split(',')
-            .map((server) => server.trim())
-            .filter(Boolean);
-
-        if (dnsServers.length > 0) {
-            dns.setServers(dnsServers);
-        }
     }
 
     try {

@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
-const { app } = require('../app');
+const app = require('../app');
 
 test('health endpoint exposes readiness and request id without starting the server', async () => {
   const response = await request(app).get('/api/health');
