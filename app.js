@@ -21,7 +21,7 @@ const healthRoutes = require('./src/middleware/health-check.js');
 dotenv.config();
 const app = express();
 
-if (process.env.TRUST_PROXY === 'true') {
+if (process.env.VERCEL || process.env.TRUST_PROXY === 'true') {
   app.set('trust proxy', 1);
 }
 
