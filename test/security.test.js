@@ -87,13 +87,15 @@ const { parseAndValidateSeats, isBookingOwner } = require('../src/controllers/bo
 
 test('booking seat validation normalizes valid input', () => {
   const seats = parseAndValidateSeats(JSON.stringify([
-    { tableId: '12', seatNumber: '3', zone: '  A  ', note: 'window' },
+    { tableId: '12', seatNumber: '3', zone: '  A  ', studentName: 'Test Student', classLevel: 'M.1', note: 'window' },
   ]));
 
   assert.deepEqual(seats, [{
     tableId: 12,
     seatNumber: 3,
     zone: 'A',
+    studentName: 'Test Student',
+    classLevel: 'M.1',
     note: 'window',
   }]);
 });
@@ -101,8 +103,8 @@ test('booking seat validation normalizes valid input', () => {
 test('booking seat validation rejects duplicate seats', () => {
   assert.throws(
     () => parseAndValidateSeats([
-      { tableId: 1, seatNumber: 1, zone: 'A' },
-      { tableId: 1, seatNumber: 1, zone: 'A' },
+      { tableId: 1, seatNumber: 1, zone: 'A', studentName: 'Student One', classLevel: 'M.1' },
+      { tableId: 1, seatNumber: 1, zone: 'A', studentName: 'Student Two', classLevel: 'M.1' },
     ]),
     (error) => error.statusCode === 400 && error.message.includes('Duplicate seat selection'),
   );

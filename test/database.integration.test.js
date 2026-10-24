@@ -76,7 +76,7 @@ if (runDatabaseTests) {
       body: {
         customerName: 'Integration User',
         phone,
-        seats: [{ tableId: 1, seatNumber: 1, zone: 'A' }],
+        seats: [{ tableId: 1, seatNumber: 1, zone: 'A', studentName: 'Integration Student', classLevel: 'M.1' }],
         bookingDate: new Date(Date.now() + 86400000).toISOString(),
       },
       user: { id: new mongoose.Types.ObjectId(), role: 'customer' },
