@@ -1,5 +1,7 @@
 const express = require('express');
 const bookingCtr = require('../controllers/bookingController');
+const { authenticate, requireAdmin } = require('../middleware/authMiddleware');
+const { bookingLimiter, paymentLimiter } = require('../middleware/rateLimiters');
 const multer = require('multer');
 const path = require('path');
 const dotenv = require('dotenv');
@@ -14,46 +16,43 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ตั้งค่า Cloudinary Storage สำหรับ multer
 const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
+  cloudinary,
   params: {
-    folder: 'chiness-booking/payment-proofs', // โฟลเดอร์ใน Cloudinary
-    allowed_formats: ['jpg', 'jpeg', 'png'], // รองรับเฉพาะไฟล์ภาพ
-    public_id: (req, file) => `${Date.now()}-${path.parse(file.originalname).name}`, // ชื่อไฟล์ใน Cloudinary
+    folder: 'chiness-booking/payment-proofs',
+    allowed_formats: ['jpg', 'jpeg', 'png'],
+    public_id: (req, file) => `${Date.now()}-${path.parse(file.originalname).name}`,
   },
 });
 
-// const storage = multer.diskStorage({
-//   destination: './uploads/',
-//   filename: (req, file, cb) => {
-//     const ext = path.extname(file.originalname);
-//     cb(null, `${Date.now()}${ext}`);
-//   },
-// });
-
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // จำกัดขนาดไฟล์ 5MB
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const filetypes = /jpeg|jpg|png/;
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = filetypes.test(file.mimetype);
-    if (extname && mimetype) {
-      return cb(null, true);
-    }
+    if (extname && mimetype) return cb(null, true);
     cb(new Error('Only images (jpeg, jpg, png) are allowed'));
   },
 });
 
-router.get('/', bookingCtr.getBookings);
-router.get('/:id', bookingCtr.getBookingById);
-router.post('/', bookingCtr.createBooking); // ไม่ต้องอัปโหลดไฟล์ตอนสร้างการจอง
-router.post('/:id/confirm-payment', upload.single('paymentProof'), bookingCtr.confirmPayment); // ยืนยันการชำระเงิน
-router.put('/:id', bookingCtr.updateBooking);
-router.patch('/:id', bookingCtr.updateBookingStatus);
-router.delete('/:id', bookingCtr.deleteBooking);
-router.get('/export/xlsx', bookingCtr.exportBookingsToXlsx);
-router.post('/check-expired', bookingCtr.checkExpiredBookings); // ตรวจสอบการจองที่หมดเวลา
+// Administrative reporting and maintenance endpoints.
+router.get('/', authenticate, requireAdmin, bookingCtr.getBookings);
+router.get('/stats', authenticate, requireAdmin, bookingCtr.getBookingStats);
+router.get('/export/xlsx', authenticate, requireAdmin, bookingCtr.exportBookingsToXlsx);
+router.post('/check-expired', authenticate, requireAdmin, bookingCtr.checkExpiredBookings);
+
+// Authenticated customer endpoints.
+router.get('/my', authenticate, bookingCtr.getMyBookings);
+router.get('/:id', authenticate, bookingCtr.getBookingById);
+router.post('/', bookingLimiter, authenticate, bookingCtr.createBooking);
+router.post('/:id/confirm-payment', paymentLimiter, authenticate, upload.single('paymentProof'), bookingCtr.confirmPayment);
+
+// Only administrators can modify booking records directly.
+router.put('/:id', authenticate, bookingCtr.updateBooking);
+router.patch('/:id', authenticate, requireAdmin, bookingCtr.updateBookingStatus);
+router.patch('/:id/check-in', authenticate, requireAdmin, bookingCtr.updateSeatCheckIn);
+router.delete('/:id', authenticate, requireAdmin, bookingCtr.deleteBooking);
 
 module.exports = router;

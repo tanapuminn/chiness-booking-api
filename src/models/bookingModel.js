@@ -14,11 +14,23 @@ const bookingSchema = new mongoose.Schema({
         type: String, 
         required: true 
     },
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'user',
+        index: true
+    },
     seats: [{
         tableId: { type: Number, required: true },
         seatNumber: { type: Number, required: true },
         zone: { type: String, required: true },
-        tableName: { type: String, required: true }
+        tableName: { type: String, required: true },
+        studentName: { type: String, trim: true, default: '' },
+        classLevel: { type: String, trim: true, default: '' },
+        checkIn: {
+            checkedIn: { type: Boolean, default: false },
+            checkedInAt: { type: Date },
+            checkedInBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user' }
+        }
     }],
     notes: { 
         type: String 
@@ -38,6 +50,18 @@ const bookingSchema = new mongoose.Schema({
     },
     paymentProof: { 
         type: String 
+    },
+    paymentTransactionRef: {
+        type: String,
+        unique: true,
+        sparse: true,
+        trim: true
+    },
+    paymentAmount: {
+        type: Number
+    },
+    paymentVerifiedAt: {
+        type: Date
     },
     paymentDeadline: {
         type: Date,
