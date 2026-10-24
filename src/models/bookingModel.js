@@ -23,7 +23,14 @@ const bookingSchema = new mongoose.Schema({
         tableId: { type: Number, required: true },
         seatNumber: { type: Number, required: true },
         zone: { type: String, required: true },
-        tableName: { type: String, required: true }
+        tableName: { type: String, required: true },
+        studentName: { type: String, trim: true, default: '' },
+        classLevel: { type: String, trim: true, default: '' },
+        checkIn: {
+            checkedIn: { type: Boolean, default: false },
+            checkedInAt: { type: Date },
+            checkedInBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user' }
+        }
     }],
     notes: { 
         type: String 

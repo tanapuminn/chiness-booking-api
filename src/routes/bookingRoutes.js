@@ -52,6 +52,7 @@ router.post('/:id/confirm-payment', paymentLimiter, authenticate, upload.single(
 // Only administrators can modify booking records directly.
 router.put('/:id', authenticate, bookingCtr.updateBooking);
 router.patch('/:id', authenticate, requireAdmin, bookingCtr.updateBookingStatus);
+router.patch('/:id/check-in', authenticate, requireAdmin, bookingCtr.updateSeatCheckIn);
 router.delete('/:id', authenticate, requireAdmin, bookingCtr.deleteBooking);
 
 module.exports = router;

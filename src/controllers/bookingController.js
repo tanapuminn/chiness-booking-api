@@ -12,6 +12,27 @@ dotenv.config();
 const ApiError = require('../utils/ApiError.js');
 const { sendTicketEmail } = require('../services/emailService.js');
 
+const generateBookingId = async (session) => {
+  const dateParts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Bangkok',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const datePart = ['year', 'month', 'day']
+    .map((type) => dateParts.find((part) => part.type === type)?.value)
+    .join('');
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const randomPart = crypto.randomInt(0, 100_000_000).toString().padStart(8, '0');
+    const id = `PSM${datePart}-${randomPart}`;
+    const existingBooking = await bookingModel.exists({ id }).session(session);
+    if (!existingBooking) return id;
+  }
+
+  throw new ApiError('Unable to generate a unique booking ID. Please try again.', 503);
+};
+
 const parseAndValidateSeats = (rawSeats) => {
   let parsedSeats;
   try {
@@ -29,9 +50,14 @@ const parseAndValidateSeats = (rawSeats) => {
     const tableId = Number(seat?.tableId);
     const seatNumber = Number(seat?.seatNumber);
     const zone = String(seat?.zone || '').trim();
+    const studentName = String(seat?.studentName || '').trim();
+    const classLevel = String(seat?.classLevel || '').trim();
 
     if (!Number.isInteger(tableId) || tableId <= 0 || !Number.isInteger(seatNumber) || seatNumber < 1 || seatNumber > 9 || !zone) {
       throw new ApiError('Each seat must have a valid tableId, seatNumber, and zone', 400);
+    }
+    if (!studentName || studentName.length > 120 || !classLevel || classLevel.length > 30) {
+      throw new ApiError('Each seat must include a student name and class level', 400);
     }
 
     const key = `${tableId}-${seatNumber}-${zone}`;
@@ -40,7 +66,7 @@ const parseAndValidateSeats = (rawSeats) => {
     }
     seen.add(key);
 
-    return { ...seat, tableId, seatNumber, zone };
+    return { ...seat, tableId, seatNumber, zone, studentName, classLevel };
   });
 };
 const isBookingOwner = (booking, req) => {
@@ -341,9 +367,10 @@ const createBooking = async (req, res, next) => {
 
     // set timeout for payment (20 minutes)
     const paymentDeadline = new Date(Date.now() + 20 * 60 * 1000);
+    const bookingId = await generateBookingId(session);
 
     const booking = new bookingModel({
-      id: `BK${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+      id: bookingId,
       customerName: normalizedCustomerName,
       phone: normalizedPhone,
       userId: req.user.id,
@@ -600,6 +627,17 @@ const updateBooking = async (req, res, next) => {
       }
     }
 
+    // Release seats when a pending booking is cancelled through this endpoint.
+    if (updates.status === 'cancelled' && booking.status === 'pending_payment') {
+      for (const seat of booking.seats) {
+        await tablePositionModel.updateOne(
+          { id: seat.tableId, zone: seat.zone || seat.seatZone, 'seats.seatNumber': seat.seatNumber },
+          { $set: { 'seats.$.isBooked': false } },
+          { session }
+        );
+      }
+    }
+
     // ถ้ามีการอัปเดต seats
     if (updates.seats) {
       const parsedSeats = parseAndValidateSeats(updates.seats);
@@ -715,6 +753,7 @@ const updateBookingStatus = async (req, res, next) => {
       throw new Error('Cannot change status from payment_timeout');
     }
 
+    const shouldSendTicketEmail = booking.status !== 'confirmed' && status === 'confirmed';
     booking.status = status;
     await booking.save({ session });
 
@@ -774,13 +813,61 @@ const updateBookingStatus = async (req, res, next) => {
     }
 
     await session.commitTransaction();
-    res.json(booking);
+    const updatedBooking = booking.toObject();
+    let ticketEmailStatus = { skipped: true, reason: 'not_attempted' };
+
+    if (shouldSendTicketEmail) {
+      try {
+        const user = booking.userId
+          ? await userModel.findById(booking.userId).select('email').lean()
+          : await userModel.findOne({ phone: booking.phone }).select('email').lean();
+        ticketEmailStatus = await sendTicketEmail({ to: user?.email, booking: updatedBooking });
+      } catch (emailError) {
+        ticketEmailStatus = { sent: false, error: emailError.message };
+        console.error(`Failed to send admin-confirmed ticket email for booking ${id}:`, emailError);
+      }
+    }
+
+    res.json({ ...updatedBooking, ticketEmailStatus });
   } catch (error) {
     await session.abortTransaction();
     console.error('Error updating booking status:', error);
     next(error);
   } finally {
     session.endSession();
+  }
+};
+
+const updateSeatCheckIn = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const tableId = Number(req.body.tableId);
+    const seatNumber = Number(req.body.seatNumber);
+    const zone = String(req.body.zone || '');
+    const checkedIn = req.body.checkedIn;
+
+    if (!Number.isInteger(tableId) || !Number.isInteger(seatNumber) || !zone || typeof checkedIn !== 'boolean') {
+      return res.status(400).json({ message: 'A valid table, seat, zone, and check-in status are required' });
+    }
+
+    const booking = await bookingModel.findOne({ id });
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    if (booking.status !== 'confirmed') {
+      return res.status(409).json({ message: 'Only confirmed bookings can be checked in' });
+    }
+
+    const seat = booking.seats.find((item) =>
+      item.tableId === tableId && item.seatNumber === seatNumber && item.zone === zone
+    );
+    if (!seat) return res.status(404).json({ message: 'Seat not found in this booking' });
+
+    seat.checkIn = checkedIn
+      ? { checkedIn: true, checkedInAt: new Date(), checkedInBy: req.user.id }
+      : { checkedIn: false, checkedInAt: undefined, checkedInBy: undefined };
+    await booking.save();
+    res.json(booking);
+  } catch (error) {
+    next(error);
   }
 };
 
@@ -1085,6 +1172,7 @@ module.exports = {
   checkExpiredBookings,
   updateBooking,
   updateBookingStatus,
+  updateSeatCheckIn,
   deleteBooking,
   exportBookingsToXlsx,
   getBookingStats
