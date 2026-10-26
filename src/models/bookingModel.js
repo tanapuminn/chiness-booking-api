@@ -19,6 +19,10 @@ const bookingSchema = new mongoose.Schema({
         ref: 'user',
         index: true
     },
+    createdByRole: {
+        type: String,
+        enum: ['user', 'admin'],
+    },
     seats: [{
         tableId: { type: Number, required: true },
         seatNumber: { type: Number, required: true },
@@ -72,6 +76,8 @@ const bookingSchema = new mongoose.Schema({
         default: Date.now 
     },
 });
+
+bookingSchema.index({ status: 1, paymentDeadline: 1 });
 
 const bookingModel = mongoose.model('booking', bookingSchema)
 

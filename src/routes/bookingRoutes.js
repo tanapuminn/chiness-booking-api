@@ -2,6 +2,7 @@ const express = require('express');
 const bookingCtr = require('../controllers/bookingController');
 const { authenticate, requireAdmin } = require('../middleware/authMiddleware');
 const { bookingLimiter, paymentLimiter } = require('../middleware/rateLimiters');
+const { refreshExpiredBookings } = require('../middleware/refreshExpiredBookings');
 const multer = require('multer');
 const path = require('path');
 const dotenv = require('dotenv');
@@ -46,7 +47,7 @@ router.post('/check-expired', authenticate, requireAdmin, bookingCtr.checkExpire
 // Authenticated customer endpoints.
 router.get('/my', authenticate, bookingCtr.getMyBookings);
 router.get('/:id', authenticate, bookingCtr.getBookingById);
-router.post('/', bookingLimiter, authenticate, bookingCtr.createBooking);
+router.post('/', bookingLimiter, authenticate, refreshExpiredBookings, bookingCtr.createBooking);
 router.post('/:id/confirm-payment', paymentLimiter, authenticate, upload.single('paymentProof'), bookingCtr.confirmPayment);
 
 // Only administrators can modify booking records directly.

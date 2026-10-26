@@ -1,4 +1,5 @@
 import tablePositionModel from '../models/tablePositionModel.js';
+import bookingModel from '../models/bookingModel.js';
 
 // ดึงโต๊ะทั้งหมด
 export const getTables = async (req, res, next) => {
@@ -82,6 +83,13 @@ export const updateTablePosition = async (req, res, next) => {
 export const deleteTable = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const existingTable = await tablePositionModel.findOne({ id });
+    if (!existingTable) {
+      return res.status(404).json({ message: 'Table not found' });
+    }
+    if (await bookingModel.exists({ 'seats.tableId': existingTable.id })) {
+      return res.status(409).json({ message: 'Cannot delete table because bookings reference it' });
+    }
     const table = await tablePositionModel.findOneAndDelete({ id });
     if (!table) {
       return res.status(404).json({ message: 'Table not found' });

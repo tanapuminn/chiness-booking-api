@@ -3,6 +3,7 @@ const bookingModel = require('../models/bookingModel.js');
 const userModel = require('../models/userModel.js');
 const tablePositionModel = require('../models/tablePositionModel.js');
 const zoneConfigModel = require('../models/zoneConfigModel.js');
+const appSettingModel = require('../models/appSettingModel.js');
 const mongoose = require('mongoose');
 const fs = require('fs');
 const dotenv = require('dotenv');
@@ -11,6 +12,11 @@ const ExcelJS = require('exceljs');
 dotenv.config();
 const ApiError = require('../utils/ApiError.js');
 const { sendTicketEmail } = require('../services/emailService.js');
+const { expirePendingBookings } = require('../services/bookingExpirationService.js');
+const { isActiveBooking, releaseBookingSeats } = require('../services/bookingSeatService.js');
+const { isBookingOwner, canAccessBooking } = require('../utils/bookingAccess.js');
+const { isPaymentConfigured } = require('../utils/paymentSettings.js');
+const { getPaymentTimeoutMinutes } = require('../utils/paymentTimeout.js');
 
 const generateBookingId = async (session) => {
   const dateParts = new Intl.DateTimeFormat('en-GB', {
@@ -69,13 +75,6 @@ const parseAndValidateSeats = (rawSeats) => {
     return { ...seat, tableId, seatNumber, zone, studentName, classLevel };
   });
 };
-const isBookingOwner = (booking, req) => {
-  if (req.user?.role === 'admin') return true;
-  if (booking.userId) return String(booking.userId) === String(req.user?.id);
-  // Backward-compatible fallback for bookings created before userId existed.
-  return Boolean(req.user?.phone) && booking.phone === req.user.phone;
-};
-
 // ดึงข้อมูลการจองทั้งหมด
 const getBookings = async (req, res, next) => {
   try {
@@ -158,8 +157,11 @@ const getBookingById = async (req, res, next) => {
     const { id } = req.params;
     const [booking] = await bookingModel.aggregate([
       {
-        $match: { id: id, ...(req.user.role !== 'admin' ? { $or: [{ userId: req.user.id }, { userId: { $exists: false }, phone: req.user.phone }] } : {}) }
+        $match: { id: id }
       },
+      ...(req.user.role === 'admin'
+        ? []
+        : [{ $match: { $or: [{ userId: req.user.id }, { userId: { $exists: false }, phone: req.user.phone }] } }]),
       {
         $lookup: {
           from: "tablepositions",
@@ -226,7 +228,7 @@ const getBookingById = async (req, res, next) => {
     if (!booking) {
       return res.status(404).json({ message: 'Booking not found' });
     }
-    res.json(booking);
+    res.json({ ...booking, serverNow: new Date().toISOString() });
   } catch (error) {
     next(error);
   }
@@ -238,6 +240,15 @@ const createBooking = async (req, res, next) => {
   session.startTransaction();
 
   try {
+    const paymentSettings = await appSettingModel.findOne({ key: 'site' }).lean();
+    if (paymentSettings?.bookingEnabled !== true) {
+      throw new ApiError('Bookings are currently closed', 503);
+    }
+    if (!isPaymentConfigured(paymentSettings)) {
+      throw new ApiError('Booking is unavailable until the payment method is configured', 503);
+    }
+    const paymentTimeoutMinutes = getPaymentTimeoutMinutes(paymentSettings);
+
     const { customerName, phone, seats, notes, bookingDate } = req.body;
     const parsedSeats = parseAndValidateSeats(seats);
     const normalizedCustomerName = String(customerName || '').trim();
@@ -273,7 +284,6 @@ const createBooking = async (req, res, next) => {
 
     // Step 1: Check and book seats atomically
     for (const group of Object.values(tableGroups)) {
-      console.log('Processing group:', group);
 
       // Check zone configuration
       const zoneConfig = await zoneConfigModel.findOne({ id: group.zone }).session(session);
@@ -289,7 +299,6 @@ const createBooking = async (req, res, next) => {
 
       // Book each seat in the group
       for (const seat of group.seats) {
-        console.log(`Attempting to book seat ${seat.seatNumber} in table ${seat.tableId} zone ${seat.zone}`);
 
         // Get table details including name
         const table = await tablePositionModel.findOne(
@@ -334,7 +343,6 @@ const createBooking = async (req, res, next) => {
           const tableSeat = table.seats.find(
             (s) => s.seatNumber === seat.seatNumber
           );
-          console.log('tableSeat:: ', tableSeat);
 
           if (!tableSeat) {
             throw new Error(`Seat ${seat.seatNumber} not found in table ${seat.tableId} in zone ${seat.zone}`);
@@ -353,7 +361,6 @@ const createBooking = async (req, res, next) => {
           );
         }
 
-        console.log(`Successfully booked seat ${seat.seatNumber}`);
         seatsToBook.push(seat);
       }
 
@@ -365,8 +372,7 @@ const createBooking = async (req, res, next) => {
       }
     }
 
-    // set timeout for payment (20 minutes)
-    const paymentDeadline = new Date(Date.now() + 20 * 60 * 1000);
+    const paymentDeadline = new Date(Date.now() + paymentTimeoutMinutes * 60 * 1000);
     const bookingId = await generateBookingId(session);
 
     const booking = new bookingModel({
@@ -374,6 +380,7 @@ const createBooking = async (req, res, next) => {
       customerName: normalizedCustomerName,
       phone: normalizedPhone,
       userId: req.user.id,
+      createdByRole: req.user.role,
       seats: seatsToBook, // Using seatsToBook which includes tableName
       notes,
       totalPrice,
@@ -385,10 +392,9 @@ const createBooking = async (req, res, next) => {
     await booking.save({ session });
 
     await session.commitTransaction();
-    console.log(`Booking created successfully with ${seatsToBook.length} seats. Payment deadline: ${paymentDeadline}`);
     res.status(201).json({
       ...booking.toObject(),
-      message: 'Booking created successfully. Please complete payment within 1 minute.',
+      message: `Booking created successfully. Please complete payment within ${paymentTimeoutMinutes} minutes.`,
       paymentDeadline: paymentDeadline
     });
   } catch (error) {
@@ -418,7 +424,7 @@ const confirmPayment = async (req, res, next) => {
       throw new Error('Booking not found');
     }
 
-    if (!isBookingOwner(booking, req)) {
+    if (!await canAccessBooking(booking, req)) {
       throw new ApiError('You do not have access to this booking', 403);
     }
 
@@ -429,7 +435,7 @@ const confirmPayment = async (req, res, next) => {
     }
 
     if (booking.status !== 'pending_payment') {
-      throw new Error(`Cannot confirm payment for booking with status: ${booking.status}`);
+      throw new ApiError(`Cannot confirm payment for booking with status: ${booking.status}`, 409);
     }
 
     // ตรวจสอบเวลาหมดอายุ
@@ -438,14 +444,7 @@ const confirmPayment = async (req, res, next) => {
       booking.status = 'payment_timeout';
       await booking.save({ session });
 
-      // รีเซ็ตที่นั่ง
-      for (const seat of booking.seats) {
-        await tablePositionModel.updateOne(
-          { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
-          { $set: { 'seats.$.isBooked': false } },
-          { session }
-        );
-      }
+      await releaseBookingSeats(booking, session);
 
       await session.commitTransaction();
       return res.status(400).json({
@@ -456,7 +455,7 @@ const confirmPayment = async (req, res, next) => {
 
     // ตรวจสอบว่ามีไฟล์ slip หรือไม่
     if (!req.file) {
-      throw new Error('Payment proof is required');
+      throw new ApiError('Payment proof is required', 400);
     }
 
     // Step 1: ตรวจสอบ slip ด้วย SlipOK
@@ -483,11 +482,25 @@ const confirmPayment = async (req, res, next) => {
       );
 
       slipData = slipokRes.data?.data;
-      const verifiedAmount = Number(slipData?.amount);
-      const transactionRef = String(slipData?.transRef || '').trim();
+      if (slipokRes.data?.success !== true || slipData?.success !== true) {
+        throw new ApiError('Payment slip could not be verified', 400);
+      }
 
-      if (!transactionRef || !Number.isFinite(verifiedAmount) || Math.abs(verifiedAmount - Number(booking.totalPrice)) > 0.005) {
+      const amountIsPresent = slipData.amount !== null && slipData.amount !== undefined && String(slipData.amount).trim() !== '';
+      const verifiedAmount = Number(slipData.amount);
+      const transactionRef = String(slipData?.transRef || '').trim();
+      const transferredAt = new Date(slipData?.transTimestamp);
+
+      if (!transactionRef || !amountIsPresent || !Number.isFinite(verifiedAmount) || Math.abs(verifiedAmount - Number(booking.totalPrice)) > 0.005) {
         throw new ApiError('Payment amount or transaction reference could not be verified', 400);
+      }
+      if (!Number.isFinite(transferredAt.getTime())) {
+        throw new ApiError('Payment time could not be verified', 400);
+      }
+      if (transferredAt.getTime() < booking.createdAt.getTime() - 60_000 ||
+          transferredAt > booking.paymentDeadline ||
+          transferredAt.getTime() > Date.now() + 60_000) {
+        throw new ApiError('Payment was made outside the booking payment window', 400);
       }
 
       const duplicatePayment = await bookingModel.findOne({ paymentTransactionRef: transactionRef }).session(session);
@@ -502,7 +515,13 @@ const confirmPayment = async (req, res, next) => {
       if (err instanceof ApiError) throw err;
 
       const errorData = err.response?.data;
-      const errorCode = errorData?.code;
+      const errorCode = Number(errorData?.code);
+      if ([1009, 1010].includes(errorCode)) {
+        throw new ApiError(errorData?.message || 'Payment verification is temporarily unavailable. Please try again.', 503);
+      }
+      if (!err.response || err.response.status >= 500 || [1001, 1002, 1003, 1004].includes(errorCode)) {
+        throw new ApiError('Payment verification is temporarily unavailable. Please try again.', 503);
+      }
       const message = errorCode === 1012
         ? 'This payment slip has already been used'
         : errorData?.message || 'Invalid slip';
@@ -518,7 +537,6 @@ const confirmPayment = async (req, res, next) => {
     await booking.save({ session });
 
     await session.commitTransaction();
-    console.log(`Payment confirmed for booking ${id}`);
 
     const confirmedBooking = booking.toObject();
     let ticketEmailStatus = { skipped: true, reason: 'not_attempted' };
@@ -544,54 +562,17 @@ const confirmPayment = async (req, res, next) => {
   } catch (error) {
     console.error('Payment confirmation failed:', error.message);
     await session.abortTransaction();
-    next(error);
+    if (error.code === 11000 && error.keyPattern?.paymentTransactionRef) {
+      next(new ApiError('This payment slip has already been used', 409));
+    } else {
+      next(error);
+    }
   } finally {
     session.endSession();
   }
 };
 
-// ตรวจสอบและยกเลิกการจองที่หมดเวลา
-const checkAndCancelExpiredBookings = async () => {
-  try {
-    const now = new Date();
-    const expiredBookings = await bookingModel.find({
-      status: 'pending_payment',
-      paymentDeadline: { $lt: now }
-    }).lean();
-
-    console.log(`Found ${expiredBookings.length} expired bookings==`);
-
-    for (const booking of expiredBookings) {
-      const session = await mongoose.startSession();
-      session.startTransaction();
-
-      try {
-        // อัปเดตสถานะเป็น payment_timeout
-        booking.status = 'payment_timeout';
-        await booking.save({ session });
-
-        // รีเซ็ตที่นั่ง
-        for (const seat of booking.seats) {
-          await tablePositionModel.updateOne(
-            { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
-            { $set: { 'seats.$.isBooked': false } },
-            { session }
-          );
-        }
-
-        await session.commitTransaction();
-        console.log(`Cancelled expired booking: ${booking.id}`);
-      } catch (error) {
-        await session.abortTransaction();
-        console.error(`Failed to cancel expired booking ${booking.id}:`, error);
-      } finally {
-        session.endSession();
-      }
-    }
-  } catch (error) {
-    console.error('Error checking expired bookings:', error);
-  }
-};
+const checkAndCancelExpiredBookings = expirePendingBookings;
 
 // อัปเดตการจอง
 const updateBooking = async (req, res, next) => {
@@ -612,8 +593,22 @@ const updateBooking = async (req, res, next) => {
       throw new Error('Booking not found');
     }
 
-    if (!isBookingOwner(booking, req)) {
+    if (!await canAccessBooking(booking, req)) {
       throw new ApiError('You do not have access to this booking', 403);
+    }
+
+    if (Object.hasOwn(updates, 'userId') || Object.hasOwn(updates, 'createdByRole')) {
+      throw new ApiError('Booking ownership cannot be changed', 400);
+    }
+
+    if (updates.status !== undefined && !['pending_payment', 'confirmed', 'cancelled', 'payment_timeout'].includes(updates.status)) {
+      throw new ApiError('Invalid status', 400);
+    }
+    if (!isActiveBooking(booking.status) && updates.status !== undefined && updates.status !== booking.status) {
+      throw new ApiError('Cannot change status after a booking is cancelled or timed out', 409);
+    }
+    if (updates.seats && (!isActiveBooking(booking.status) || (updates.status && !isActiveBooking(updates.status)))) {
+      throw new ApiError('Cannot change seats on a cancelled or timed-out booking', 409);
     }
 
     if (req.user.role !== 'admin') {
@@ -627,29 +622,15 @@ const updateBooking = async (req, res, next) => {
       }
     }
 
-    // Release seats when a pending booking is cancelled through this endpoint.
-    if (updates.status === 'cancelled' && booking.status === 'pending_payment') {
-      for (const seat of booking.seats) {
-        await tablePositionModel.updateOne(
-          { id: seat.tableId, zone: seat.zone || seat.seatZone, 'seats.seatNumber': seat.seatNumber },
-          { $set: { 'seats.$.isBooked': false } },
-          { session }
-        );
-      }
+    if (isActiveBooking(booking.status) && updates.status && !isActiveBooking(updates.status)) {
+      await releaseBookingSeats(booking, session);
     }
 
     // ถ้ามีการอัปเดต seats
     if (updates.seats) {
       const parsedSeats = parseAndValidateSeats(updates.seats);
 
-      // รีเซ็ต isBooked สำหรับที่นั่งเดิม
-      for (const seat of booking.seats) {
-        await tablePositionModel.updateOne(
-          { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
-          { $set: { 'seats.$.isBooked': false } },
-          { session }
-        );
-      }
+      await releaseBookingSeats(booking, session);
 
       // ตรวจสอบที่นั่งใหม่
       for (const seat of parsedSeats) {
@@ -737,12 +718,16 @@ const updateBookingStatus = async (req, res, next) => {
     const { status } = req.body;
 
     if (!['pending_payment', 'confirmed', 'cancelled', 'payment_timeout'].includes(status)) {
-      throw new Error('Invalid status');
+      throw new ApiError('Invalid status', 400);
     }
 
     const booking = await bookingModel.findOne({ id: id }).session(session);
     if (!booking) {
       throw new Error('Booking not found');
+    }
+
+    if (!await canAccessBooking(booking, req)) {
+      throw new ApiError('You do not have access to this booking', 403);
     }
 
     if (booking.status === 'cancelled' && status !== 'cancelled') {
@@ -754,62 +739,12 @@ const updateBookingStatus = async (req, res, next) => {
     }
 
     const shouldSendTicketEmail = booking.status !== 'confirmed' && status === 'confirmed';
+    const previousStatus = booking.status;
     booking.status = status;
     await booking.save({ session });
 
-    // รีเซ็ต isBooked เมื่อสถานะเป็น cancelled หรือ payment_timeout
-    if (status === 'cancelled' || status === 'payment_timeout') {
-      console.log(`${status === 'cancelled' ? 'Cancelling' : 'Payment timeout for'} booking, resetting seats:`, booking.seats);
-
-      for (const seat of booking.seats) {
-        // ใช้ seat.zone แทน seat.seatZone (ตรวจสอบชื่อฟิลด์ที่ถูกต้อง)
-        const seatZone = seat.zone || seat.seatZone;
-
-        console.log(`Resetting seat - tableId: ${seat.tableId}, zone: ${seatZone}, seatNumber: ${seat.seatNumber}`);
-
-        // ตรวจสอบว่า table มีอยู่หรือไม่ก่อน
-        const table = await tablePositionModel.findOne({
-          id: seat.tableId,
-          zone: seatZone
-        }).session(session);
-
-        if (!table) {
-          console.warn(`Table not found - tableId: ${seat.tableId}, zone: ${seatZone}`);
-          continue;
-        }
-
-        // ตรวจสอบว่า seat มีอยู่ใน table หรือไม่
-        const tableSeat = table.seats.find(s =>
-          s.seatNumber === seat.seatNumber
-        );
-
-        if (!tableSeat) {
-          console.warn(`Seat not found in table - seatNumber: ${seat.seatNumber}, zone: ${seatZone}`);
-          continue;
-        }
-
-        // อัปเดต isBooked เป็น false
-        const result = await tablePositionModel.updateOne(
-          {
-            id: seat.tableId,
-            zone: seatZone,
-            'seats.seatNumber': seat.seatNumber
-          },
-          { $set: { 'seats.$.isBooked': false } },
-          { session }
-        );
-
-        console.log(`Update result for seat ${seat.seatNumber}:`, {
-          matchedCount: result.matchedCount,
-          modifiedCount: result.modifiedCount
-        });
-
-        if (!result.matchedCount) {
-          console.warn(`No matching document found for tableId: ${seat.tableId}, zone: ${seatZone}, seatNumber: ${seat.seatNumber}`);
-        } else if (!result.modifiedCount) {
-          console.warn(`Document found but not modified for tableId: ${seat.tableId}, zone: ${seatZone}, seatNumber: ${seat.seatNumber}`);
-        }
-      }
+    if (isActiveBooking(previousStatus) && !isActiveBooking(status)) {
+      await releaseBookingSeats(booking, session);
     }
 
     await session.commitTransaction();
@@ -852,6 +787,9 @@ const updateSeatCheckIn = async (req, res, next) => {
 
     const booking = await bookingModel.findOne({ id });
     if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    if (!await canAccessBooking(booking, req)) {
+      return res.status(403).json({ message: 'You do not have access to this booking' });
+    }
     if (booking.status !== 'confirmed') {
       return res.status(409).json({ message: 'Only confirmed bookings can be checked in' });
     }
@@ -873,6 +811,7 @@ const updateSeatCheckIn = async (req, res, next) => {
 
 // ลบการจอง
 const deleteBooking = async (req, res, next) => {
+  const session = await mongoose.startSession();
   try {
     const { id } = req.params;
 
@@ -880,24 +819,35 @@ const deleteBooking = async (req, res, next) => {
       throw new Error('Booking ID is required');
     }
 
-    const booking = await bookingModel.findOne({ id: id });
-    if (!booking) {
-      throw new Error('Booking not found');
-    }
+    await session.withTransaction(async () => {
+      const booking = await bookingModel.findOne({ id }).session(session);
+      if (!booking) throw new ApiError('Booking not found', 404);
+      if (!await canAccessBooking(booking, req)) {
+        throw new ApiError('You do not have access to this booking', 403);
+      }
 
-    // ลบ booking
-    await bookingModel.deleteOne({ id: id });
+      await bookingModel.deleteOne({ id }, { session });
+
+      if (isActiveBooking(booking.status)) {
+        await releaseBookingSeats(booking, session);
+      }
+    });
 
     res.status(204).send();
   } catch (error) {
     next(error);
+  } finally {
+    await session.endSession();
   }
 };
 
 // Export bookings to XLSX
 const exportBookingsToXlsx = async (req, res, next) => {
   try {
-    const bookings = await bookingModel.find().select("id customerName phone seats status totalPrice bookingDate paymentProof notes").sort({ createdAt: -1 });
+    const bookings = await bookingModel.aggregate([
+      { $project: { id: 1, customerName: 1, phone: 1, seats: 1, status: 1, totalPrice: 1, bookingDate: 1, paymentProof: 1, notes: 1, createdAt: 1 } },
+      { $sort: { createdAt: -1 } },
+    ]);
     // แปลงข้อมูลเป็น array ของ object สำหรับ worksheet
     const data = bookings.map(b => ({
       รหัสการจอง: b.id,
@@ -946,97 +896,13 @@ const exportBookingsToXlsx = async (req, res, next) => {
 // ตรวจสอบการจองที่หมดเวลาทันที (API endpoint)
 const checkExpiredBookings = async (req, res, next) => {
   try {
-    console.log('Checking for expired bookings...');
     const now = new Date();
-    
-    // Find expired bookings
-    const expiredBookings = await bookingModel.find({
-      status: 'pending_payment',
-      paymentDeadline: { $lt: now }
+    const result = await expirePendingBookings(now);
+    return res.status(result.errors.length ? 500 : 200).json({
+      message: 'Expiration check completed',
     });
-
-    // Find pending bookings to calculate remaining time
-    const pendingBookings = await bookingModel.find({
-      status: 'pending_payment',
-      paymentDeadline: { $gt: now }
-    });
-
-    // Calculate remaining time for pending bookings
-    const pendingBookingsWithTime = pendingBookings.map(booking => ({
-      id: booking.id,
-      remainingTime: Math.max(0, booking.paymentDeadline - now),
-      paymentDeadline: booking.paymentDeadline
-    }));
-
-    console.log(`Found ${expiredBookings.length} expired bookings`);
-
-    let cancelledCount = 0;
-    let errorMessages = [];
-
-    for (const booking of expiredBookings) {
-      const session = await mongoose.startSession();
-      session.startTransaction();
-
-      try {
-        // อัปเดตสถานะเป็น payment_timeout
-        const expiredBooking = await bookingModel.findOneAndUpdate(
-          {
-            id: booking.id,
-            status: 'pending_payment',
-            paymentDeadline: { $lt: now },
-          },
-          { $set: { status: 'payment_timeout' } },
-          { new: true, session }
-        );
-
-        if (!expiredBooking) {
-          await session.commitTransaction();
-          continue;
-        }
-
-        for (const seat of expiredBooking.seats) {
-          await tablePositionModel.updateOne(
-            { id: seat.tableId, zone: seat.zone, 'seats.seatNumber': seat.seatNumber },
-            { $set: { 'seats.$.isBooked': false } },
-            { session }
-          );
-        }
-
-        await session.commitTransaction();
-        console.log(`Cancelled expired booking: ${expiredBooking.id}`);
-        cancelledCount++;
-      } catch (error) {
-        await session.abortTransaction();
-        console.error(`Failed to cancel expired booking ${expiredBooking.id}:`, error);
-        errorMessages.push(`Failed to cancel booking ${expiredBooking.id}: ${error.message}`);
-      } finally {
-        session.endSession();
-      }
-    }
-
-    // ตรวจสอบว่าการรีเซ็ตที่นั่งสำเร็จครบทุก booking หรือไม่
-    if (expiredBookings.length > 0) {
-      return res.status(200).json({
-        message: `Checked expired bookings. Found ${expiredBookings.length} expired bookings, successfully cancelled ${cancelledCount} bookings.`,
-        expiredCount: expiredBookings.length,
-        cancelledCount: cancelledCount,
-        pendingBookings: pendingBookingsWithTime
-      });
-    } else {
-      return res.status(200).json({
-        message: 'No expired bookings found.',
-        expiredCount: 0,
-        cancelledCount: 0,
-        pendingBookings: pendingBookingsWithTime,
-        errors: errorMessages
-      });
-    }
   } catch (error) {
-    console.error('Error checking expired bookings:', error);
-    return res.status(500).json({
-      message: 'Error checking expired bookings',
-      error: error.message
-    });
+    next(error);
   }
 };
 

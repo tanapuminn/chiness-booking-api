@@ -1,4 +1,5 @@
 const mongoose = require('mongoose')
+const dns = require('node:dns');
 const dotenv = require('dotenv');
 const logger = require('../utils/logger');
 dotenv.config();
@@ -20,6 +21,17 @@ const connectDB = async () => {
     }
 
     try {
+        // Atlas mongodb+srv URIs require DNS SRV lookups. Some local DNS
+        // resolvers work with nslookup but refuse Node's SRV requests.
+        const dnsServers = (process.env.MONGODB_DNS_SERVERS || '')
+            .split(',')
+            .map((server) => server.trim())
+            .filter(Boolean);
+        if (uri.startsWith('mongodb+srv://') && dnsServers.length > 0) {
+            dns.setServers(dnsServers);
+            logger.info('mongodb_dns_servers_configured', { count: dnsServers.length });
+        }
+
         const maxAttempts = Math.max(1, Number(process.env.MONGODB_CONNECT_RETRIES || 3));
         let lastError;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {

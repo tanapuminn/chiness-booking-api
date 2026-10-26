@@ -1,13 +1,18 @@
 const cron = require('node-cron');
-const bookingController = require('../controllers/bookingController.js');
+const { expirePendingBookings } = require('../services/bookingExpirationService.js');
 const logger = require('./logger');
 
-const startBookingScheduler = () => {
+const startBookingScheduler = ({ schedule = cron.schedule, expire = expirePendingBookings } = {}) => {
   logger.info('booking_scheduler_started');
-  const task = cron.schedule('*/6 * * * *', async () => {
+  const task = schedule('*/6 * * * *', async () => {
     try {
-      logger.info('booking_scheduler_run', { at: new Date().toISOString() });
-      await bookingController.checkExpiredBookings();
+      const result = await expire();
+      logger.info('booking_scheduler_run', {
+        at: new Date().toISOString(),
+        expiredCount: result.expiredCount,
+        cancelledCount: result.cancelledCount,
+        errorCount: result.errors.length,
+      });
     } catch (error) {
       logger.error('booking_scheduler_failed', { error: logger.serializeError(error) });
     }

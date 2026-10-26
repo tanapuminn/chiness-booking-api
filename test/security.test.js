@@ -120,5 +120,5 @@ test('booking ownership requires matching user or legacy phone', () => {
   assert.equal(isBookingOwner({ userId: 'user-1' }, { user: { id: 'user-1', role: 'customer' } }), true);
   assert.equal(isBookingOwner({ userId: 'user-1' }, { user: { id: 'user-2', role: 'customer' } }), false);
   assert.equal(isBookingOwner({ phone: '0812345678' }, { user: { phone: '0812345678', role: 'customer' } }), true);
-  assert.equal(isBookingOwner({ userId: 'user-1' }, { user: { role: 'admin' } }), true);
+  assert.equal(isBookingOwner({ userId: 'user-1' }, { user: { role: 'admin', id: 'user-2' } }), false);
 });

@@ -1,5 +1,7 @@
 
 import zoneConfigModel from '../models/zoneConfigModel.js';
+import bookingModel from '../models/bookingModel.js';
+import tablePositionModel from '../models/tablePositionModel.js';
 
 export const getZoneConfigs = async (req, res, next) => {
 try {
@@ -76,6 +78,16 @@ export const updateZoneConfig = async (req, res, next) => {
 export const deleteZoneConfig = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const existingZone = await zoneConfigModel.findOne({ id });
+    if (!existingZone) {
+      return res.status(404).json({ message: 'Zone not found' });
+    }
+    if (await bookingModel.exists({ 'seats.zone': id })) {
+      return res.status(409).json({ message: 'Cannot delete zone because bookings reference it' });
+    }
+    if (await tablePositionModel.exists({ zone: id })) {
+      return res.status(409).json({ message: 'Cannot delete zone while it contains tables' });
+    }
     const zone = await zoneConfigModel.findOneAndDelete({ id });
     if (!zone) {
       return res.status(404).json({ message: 'Zone not found' });

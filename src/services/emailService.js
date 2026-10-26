@@ -141,7 +141,6 @@ const sendTicketEmail = async ({ to, booking }) => {
     html: buildTicketEmailHtml({ booking, ticketUrl, settings }),
   });
 
-  console.log(`Ticket email sent for booking ${booking.id} to ${to}`);
   return { sent: true };
 };
 

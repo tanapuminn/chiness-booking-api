@@ -33,5 +33,7 @@ const upload = multer({
 router.get('/', settingsCtr.getSettings);
 router.get('/promptpay-qr', settingsCtr.getPromptPayQr);
 router.put('/', authenticate, requireAdmin, upload.single('bankAccountImage'), settingsCtr.updateSettings);
+router.patch('/booking-status', authenticate, requireAdmin, settingsCtr.updateBookingStatus);
+router.patch('/payment-timeout', authenticate, requireAdmin, settingsCtr.updatePaymentTimeout);
 
 module.exports = router;
