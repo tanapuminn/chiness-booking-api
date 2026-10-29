@@ -16,7 +16,7 @@ try {
 // สร้างโซนใหม่
 export const createZoneConfig = async (req, res, next) => {
   try {
-    const { id, name, description, allowIndividualSeatBooking, seatPrice, tablePrice } = req.body;
+    const { id, name, description, allowIndividualSeatBooking, seatPrice, tablePrice, color } = req.body;
 
     // ตรวจสอบข้อมูลที่จำเป็น
     if (!id || !name || !description || seatPrice == null || tablePrice == null) {
@@ -33,6 +33,9 @@ export const createZoneConfig = async (req, res, next) => {
     if (seatPrice < 0 || tablePrice < 0) {
       return res.status(400).json({ message: 'seatPrice and tablePrice must be non-negative numbers' });
     }
+    if (color !== undefined && !/^#[0-9A-F]{6}$/i.test(color)) {
+      return res.status(400).json({ message: 'color must be a 6-digit hex color' });
+    }
 
     const zone = new zoneConfigModel({
       id,
@@ -42,6 +45,7 @@ export const createZoneConfig = async (req, res, next) => {
       allowIndividualSeatBooking: allowIndividualSeatBooking ?? true,
       seatPrice: Number(seatPrice),
       tablePrice: Number(tablePrice),
+      color: color?.toUpperCase(),
     });
 
     await zone.save();
@@ -64,6 +68,10 @@ export const updateZoneConfig = async (req, res, next) => {
     if (updates.tablePrice != null && updates.tablePrice < 0) {
       return res.status(400).json({ message: 'tablePrice must be a non-negative number' });
     }
+    if (updates.color !== undefined && !/^#[0-9A-F]{6}$/i.test(updates.color)) {
+      return res.status(400).json({ message: 'color must be a 6-digit hex color' });
+    }
+    if (updates.color) updates.color = updates.color.toUpperCase();
     if (updates.gridRows !== undefined || updates.gridCols !== undefined) {
       const tables = await tablePositionModel.find({ zone: id }, { x: 1, y: 1 }).lean();
       const gridError = validateGridUpdate(updates, tables);

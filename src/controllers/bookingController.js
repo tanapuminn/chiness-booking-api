@@ -841,6 +841,91 @@ const deleteBooking = async (req, res, next) => {
   }
 };
 
+const getBookingStatusLabel = (status) => ({
+  pending_payment: 'รอชำระเงิน',
+  confirmed: 'ยืนยันแล้ว',
+  cancelled: 'ยกเลิก',
+  payment_timeout: 'หมดเวลาชำระเงิน',
+}[status] || status || '');
+
+const formatBookingDate = (bookingDate) => bookingDate
+  ? new Date(bookingDate).toLocaleString('th-TH')
+  : '';
+
+const formatSeatLabel = (seat) => {
+  const tableName = seat.tableName || `โต๊ะ ${seat.tableId}`;
+  return `${seat.zone || '-'} / ${tableName} / ที่นั่ง ${seat.seatNumber}`;
+};
+
+const buildBookingExportRows = (bookings) => bookings.map((booking) => {
+  const seats = Array.isArray(booking.seats) ? booking.seats : [];
+  const zones = [...new Set(seats.map((seat) => seat.zone).filter(Boolean))];
+  const tables = [...new Set(seats.map((seat) => seat.tableName || `โต๊ะ ${seat.tableId}`).filter(Boolean))];
+
+  return {
+    รหัสการจอง: booking.id,
+    ชื่อลูกค้า: booking.customerName,
+    เบอร์โทร: booking.phone,
+    โซน: zones.join(', '),
+    โต๊ะ: tables.join(', '),
+    จำนวนที่นั่ง: seats.length,
+    รายละเอียดผู้ที่นั่ง: seats.map((seat) => {
+      const student = seat.studentName || '-';
+      const classLevel = seat.classLevel || '-';
+      return `${formatSeatLabel(seat)}: ${student} (${classLevel})`;
+    }).join('\n'),
+    สถานะ: getBookingStatusLabel(booking.status),
+    ราคารวม: booking.totalPrice,
+    วันที่จอง: formatBookingDate(booking.bookingDate),
+    หลักฐานการชำระเงิน: booking.paymentProof || '',
+    หมายเหตุ: booking.notes || '',
+  };
+});
+
+const buildSeatExportRows = (bookings) => bookings.flatMap((booking) => {
+  const seats = Array.isArray(booking.seats) ? booking.seats : [];
+  return seats.map((seat) => ({
+    รหัสการจอง: booking.id,
+    ชื่อลูกค้า: booking.customerName,
+    เบอร์โทร: booking.phone,
+    โซน: seat.zone || '',
+    โต๊ะ: seat.tableName || `โต๊ะ ${seat.tableId}`,
+    ที่นั่ง: seat.seatNumber,
+    ชื่อผู้ที่นั่ง: seat.studentName || '',
+    ชั้น: seat.classLevel || '',
+    สถานะ: getBookingStatusLabel(booking.status),
+    วันที่จอง: formatBookingDate(booking.bookingDate),
+  }));
+});
+
+const addExportWorksheet = (workbook, name, rows, widths = {}) => {
+  const worksheet = workbook.addWorksheet(name);
+  if (rows.length === 0) return worksheet;
+
+  const headers = Object.keys(rows[0]);
+  worksheet.columns = headers.map((header) => ({
+    header,
+    key: header,
+    width: widths[header] || Math.min(Math.max(header.length + 4, 14), 40),
+  }));
+  worksheet.addRows(rows);
+  worksheet.views = [{ state: 'frozen', ySplit: 1 }];
+  worksheet.autoFilter = { from: 'A1', to: `${worksheet.getColumn(headers.length).letter}1` };
+
+  const headerRow = worksheet.getRow(1);
+  headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF9D174D' } };
+  headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+  headerRow.height = 24;
+
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    row.alignment = { vertical: 'top', wrapText: true };
+  });
+
+  return worksheet;
+};
+
 // Export bookings to XLSX
 const exportBookingsToXlsx = async (req, res, next) => {
   try {
@@ -848,34 +933,28 @@ const exportBookingsToXlsx = async (req, res, next) => {
       { $project: { id: 1, customerName: 1, phone: 1, seats: 1, status: 1, totalPrice: 1, bookingDate: 1, paymentProof: 1, notes: 1, createdAt: 1 } },
       { $sort: { createdAt: -1 } },
     ]);
-    // แปลงข้อมูลเป็น array ของ object สำหรับ worksheet
-    const data = bookings.map(b => ({
-      รหัสการจอง: b.id,
-      ชื่อลูกค้า: b.customerName,
-      เบอร์โทร: b.phone,
-      โซน: b.seats && b.seats.length > 0 ? b.seats[0].zone : '',
-      โต๊ะ: b.seats && b.seats.length > 0 ? b.seats[0].tableName : '',
-      ที่นั่ง: Array.isArray(b.seats) ? b.seats.map(s => `${s.seatNumber}`).join(", ") : '',
-      // ที่นั่ง: Array.isArray(b.seats) ? b.seats.map(s => `โต๊ะ${s.tableName}-ที่นั่ง${s.seatNumber}`).join(", ") : '',
-      สถานะ: b.status === 'pending_payment' ? 'รอชำระเงิน' :
-        b.status === 'confirmed' ? 'ยืนยันแล้ว' :
-          b.status === 'cancelled' ? 'ยกเลิก' :
-            b.status === 'payment_timeout' ? 'หมดเวลาชำระเงิน' : b.status,
-      "ราคารวม": b.totalPrice,
-      "วันที่จอง": b.bookingDate ? new Date(b.bookingDate).toLocaleString('th-TH') : '',
-      "หลักฐานการชำระเงิน": b.paymentProof || '',
-      หมายเหตุ: b.notes || ''
-    }));
+    const bookingRows = buildBookingExportRows(bookings);
+    const seatRows = buildSeatExportRows(bookings);
     const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Bookings');
-    worksheet.columns = Object.keys(data[0] || {}).map((header) => ({
-      header,
-      key: header,
-      width: Math.min(Math.max(header.length + 4, 14), 40)
-    }));
-    worksheet.addRows(data);
-    worksheet.getRow(1).font = { bold: true };
-    worksheet.views = [{ state: 'frozen', ySplit: 1 }];
+    workbook.creator = 'Table Booking';
+    addExportWorksheet(workbook, 'Bookings', bookingRows, {
+      รหัสการจอง: 22,
+      ชื่อลูกค้า: 24,
+      เบอร์โทร: 16,
+      รายละเอียดผู้ที่นั่ง: 52,
+      วันที่จอง: 22,
+      หลักฐานการชำระเงิน: 36,
+      หมายเหตุ: 30,
+    });
+    addExportWorksheet(workbook, 'Seat Details', seatRows, {
+      รหัสการจอง: 22,
+      ชื่อลูกค้า: 24,
+      เบอร์โทร: 16,
+      โต๊ะ: 16,
+      ชื่อผู้ที่นั่ง: 26,
+      ชั้น: 14,
+      วันที่จอง: 22,
+    });
     const buf = await workbook.xlsx.writeBuffer();
     const now = new Date();
     const formattedDateTime = now.getFullYear().toString() +

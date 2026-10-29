@@ -1,11 +1,11 @@
 const AUTH_COOKIE_NAME = 'auth_token';
-const AUTH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const { getAuthSessionMaxAgeMs } = require('./authSession');
 
 const getAuthCookieOptions = () => ({
   httpOnly: true,
   secure: process.env.NODE_ENV === 'production',
   sameSite: process.env.AUTH_COOKIE_SAMESITE || 'lax',
-  maxAge: AUTH_COOKIE_MAX_AGE_MS,
+  maxAge: getAuthSessionMaxAgeMs(),
   path: '/',
 });
 
