@@ -12,9 +12,13 @@ const authenticate = async (req, res, next) => {
   }
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await userModel.findById(payload.id).select('phone email fullname role').lean();
+    const user = await userModel.findById(payload.id).select('phone email fullname role passwordChangedAt').lean();
 
     if (!user) {
+      return res.status(401).json({ message: 'Invalid or expired token' });
+    }
+    // session ที่ออกก่อนตั้งรหัสผ่านใหม่ใช้ต่อไม่ได้ (iat เป็นวินาที จึงเผื่อ 1 วินาที)
+    if (user.passwordChangedAt && payload.iat * 1000 < new Date(user.passwordChangedAt).getTime() - 1000) {
       return res.status(401).json({ message: 'Invalid or expired token' });
     }
 

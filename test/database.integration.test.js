@@ -783,4 +783,51 @@ if (runDatabaseTests) {
     assert.equal((await asAdminA('delete', '/api/bookings/BK-admin-b')).status, 204);
     assert.equal(await bookingModel.countDocuments({ id: 'BK-admin-b' }), 0);
   });
+  test('forgot and reset password: generic reply, single-use expiring link, old sessions revoked', async (t) => {
+    process.env.JWT_SECRET ||= 'integration-test-secret';
+    const previousFrontendUrl = process.env.FRONTEND_URL;
+    process.env.FRONTEND_URL = 'http://localhost:3000/';
+    t.after(() => {
+      if (previousFrontendUrl === undefined) delete process.env.FRONTEND_URL; else process.env.FRONTEND_URL = previousFrontendUrl;
+    });
+    const emailService = require('../src/services/emailService');
+    const sentEmails = [];
+    t.mock.method(emailService, 'sendPasswordResetEmail', async (message) => { sentEmails.push(message); return { sent: true }; });
+
+    const bcrypt = require('bcryptjs');
+    const user = await userModel.create({
+      email: 'reset-me@example.com', fullname: 'Reset Me', phone: '0800000091', password: await bcrypt.hash('OldPass123', 10),
+    });
+    const oldSession = jwt.sign({ id: user.id, iat: Math.floor(Date.now() / 1000) - 60 }, process.env.JWT_SECRET);
+
+    assert.equal((await request(app).post('/api/auth/forgot-password').send({ email: 'not-an-email' })).status, 400);
+    const unknown = await request(app).post('/api/auth/forgot-password').send({ email: 'nobody@example.com' });
+    const known = await request(app).post('/api/auth/forgot-password').send({ email: ' Reset-Me@Example.com ' });
+    assert.equal(unknown.status, 200);
+    assert.deepEqual(known.body, unknown.body);
+    assert.equal(sentEmails.length, 1);
+    assert.equal(sentEmails[0].to, 'reset-me@example.com');
+    assert.match(sentEmails[0].resetUrl, /^http:\/\/localhost:3000\/reset-password\?token=[0-9a-f]{64}$/);
+    const token = new URL(sentEmails[0].resetUrl).searchParams.get('token');
+    const stored = await userModel.findById(user.id);
+    assert.notEqual(stored.passwordResetTokenHash, token);
+
+    assert.equal((await request(app).post('/api/auth/reset-password').send({ token, password: '123' })).status, 400);
+    assert.equal((await request(app).post('/api/auth/reset-password').send({ token: 'wrong', password: 'NewPass123' })).status, 400);
+    const reset = await request(app).post('/api/auth/reset-password').send({ token, password: 'NewPass123' });
+    assert.equal(reset.status, 200);
+    assert.equal((await request(app).post('/api/auth/reset-password').send({ token, password: 'Another123' })).status, 400);
+
+    assert.equal((await request(app).post('/api/auth/login').send({ phone: '0800000091', password: 'OldPass123' })).status, 401);
+    assert.equal((await request(app).post('/api/auth/login').send({ phone: '0800000091', password: 'NewPass123' })).status, 200);
+    assert.equal((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${oldSession}`)).status, 401);
+    const freshSession = jwt.sign({ id: user.id }, process.env.JWT_SECRET);
+    assert.equal((await request(app).get('/api/auth/me').set('Authorization', `Bearer ${freshSession}`)).status, 200);
+
+    await request(app).post('/api/auth/forgot-password').send({ email: 'reset-me@example.com' });
+    const expiredToken = new URL(sentEmails[1].resetUrl).searchParams.get('token');
+    await userModel.updateOne({ _id: user.id }, { passwordResetExpiresAt: new Date(Date.now() - 1000) });
+    assert.equal((await request(app).post('/api/auth/reset-password').send({ token: expiredToken, password: 'Expired123' })).status, 400);
+  });
 }
+

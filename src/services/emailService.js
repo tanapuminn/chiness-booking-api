@@ -144,4 +144,39 @@ const sendTicketEmail = async ({ to, booking }) => {
   return { sent: true };
 };
 
-module.exports = { sendTicketEmail };
+const buildPasswordResetHtml = ({ fullname, resetUrl, projectLine, ttlMinutes }) => `
+    <div style="font-family: Arial, 'Tahoma', sans-serif; color: #111827; line-height: 1.6; max-width: 560px; margin: 0 auto;">
+      <h1 style="font-size: 22px; margin: 0 0 8px;">ตั้งรหัสผ่านใหม่</h1>
+      ${projectLine ? `<p style="margin: 0 0 16px; color: #4b5563;">${escapeHtml(projectLine)}</p>` : ''}
+      <p>สวัสดีคุณ ${escapeHtml(fullname)}</p>
+      <p>เราได้รับคำขอตั้งรหัสผ่านใหม่สำหรับบัญชีของคุณ กดปุ่มด้านล่างเพื่อตั้งรหัสผ่านใหม่ ลิงก์นี้ใช้ได้ครั้งเดียวและมีอายุ ${ttlMinutes} นาที</p>
+      <p style="margin: 24px 0;"><a href="${escapeHtml(resetUrl)}" style="display:inline-block; background:#be2a7c; color:#ffffff; text-decoration:none; padding:10px 18px; border-radius:6px; font-weight:600;">ตั้งรหัสผ่านใหม่</a></p>
+      <p style="font-size: 13px; color: #6b7280;">ถ้าคุณไม่ได้ขอตั้งรหัสผ่านใหม่ ไม่ต้องทำอะไร รหัสผ่านเดิมยังใช้ได้ตามปกติ</p>
+    </div>
+  `;
+
+const sendPasswordResetEmail = async ({ to, fullname, resetUrl, ttlMinutes }) => {
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.warn('Password reset email skipped: SMTP env is not configured');
+    return { skipped: true, reason: 'smtp_not_configured' };
+  }
+
+  const settings = await getSiteSettings();
+  const projectLine = buildProjectLine(settings);
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM || process.env.SMTP_USER,
+    to,
+    subject: `${projectLine ? `${projectLine} - ` : ''}ตั้งรหัสผ่านใหม่`,
+    text: [
+      `สวัสดีคุณ ${fullname}`,
+      `ตั้งรหัสผ่านใหม่ได้ที่ลิงก์นี้ (ใช้ได้ครั้งเดียว มีอายุ ${ttlMinutes} นาที): ${resetUrl}`,
+      'ถ้าคุณไม่ได้ขอตั้งรหัสผ่านใหม่ ไม่ต้องทำอะไร รหัสผ่านเดิมยังใช้ได้ตามปกติ',
+    ].join('\n'),
+    html: buildPasswordResetHtml({ fullname, resetUrl, projectLine, ttlMinutes }),
+  });
+
+  return { sent: true };
+};
+
+module.exports = { sendTicketEmail, sendPasswordResetEmail };
