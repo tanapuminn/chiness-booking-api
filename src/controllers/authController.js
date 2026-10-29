@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const userModel = require('../models/userModel');
 const { setAuthCookie, clearAuthCookie } = require('../utils/authCookie');
+const { getAuthSessionDuration } = require('../utils/authSession');
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -10,7 +11,7 @@ const signToken = (user) =>
   jwt.sign(
     { id: user._id, phone: user.phone || '', email: user.email, fullname: user.fullname, role: user.role },
     process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+    { expiresIn: getAuthSessionDuration() }
   );
 
 const formatUser = (user) => ({

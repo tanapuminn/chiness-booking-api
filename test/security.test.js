@@ -7,6 +7,7 @@ const {
   getAuthToken,
 } = require('../src/utils/authCookie');
 const { requireAdmin } = require('../src/middleware/authMiddleware');
+const { getAuthSessionDuration, getAuthSessionMaxAgeMs } = require('../src/utils/authSession');
 
 const createResponse = () => ({
   cookieCalls: [],
@@ -15,12 +16,33 @@ const createResponse = () => ({
   clearCookie(...args) { this.clearCookieCalls.push(args); },
 });
 
+test('auth session duration uses one config for JWT and cookie lifetime', () => {
+  const previousExpiry = process.env.JWT_EXPIRES_IN;
+  process.env.JWT_EXPIRES_IN = '1d';
+
+  assert.equal(getAuthSessionDuration(), '1d');
+  assert.equal(getAuthSessionMaxAgeMs(), 24 * 60 * 60 * 1000);
+
+  if (previousExpiry === undefined) delete process.env.JWT_EXPIRES_IN; else process.env.JWT_EXPIRES_IN = previousExpiry;
+});
+
+test('auth session duration rejects unsupported formats', () => {
+  const previousExpiry = process.env.JWT_EXPIRES_IN;
+  process.env.JWT_EXPIRES_IN = 'tomorrow';
+
+  assert.throws(() => getAuthSessionMaxAgeMs(), /JWT_EXPIRES_IN/);
+
+  if (previousExpiry === undefined) delete process.env.JWT_EXPIRES_IN; else process.env.JWT_EXPIRES_IN = previousExpiry;
+});
+
 test('auth cookie stores secure HttpOnly session settings', () => {
   const response = createResponse();
   const previousEnvironment = process.env.NODE_ENV;
   const previousSameSite = process.env.AUTH_COOKIE_SAMESITE;
+  const previousExpiry = process.env.JWT_EXPIRES_IN;
   process.env.NODE_ENV = 'production';
   process.env.AUTH_COOKIE_SAMESITE = 'none';
+  process.env.JWT_EXPIRES_IN = '1d';
 
   setAuthCookie(response, 'signed-token');
 
@@ -30,10 +52,12 @@ test('auth cookie stores secure HttpOnly session settings', () => {
   assert.equal(response.cookieCalls[0][2].httpOnly, true);
   assert.equal(response.cookieCalls[0][2].secure, true);
   assert.equal(response.cookieCalls[0][2].sameSite, 'none');
+  assert.equal(response.cookieCalls[0][2].maxAge, 24 * 60 * 60 * 1000);
   assert.equal(response.cookieCalls[0][2].path, '/');
 
   if (previousEnvironment === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previousEnvironment;
   if (previousSameSite === undefined) delete process.env.AUTH_COOKIE_SAMESITE; else process.env.AUTH_COOKIE_SAMESITE = previousSameSite;
+  if (previousExpiry === undefined) delete process.env.JWT_EXPIRES_IN; else process.env.JWT_EXPIRES_IN = previousExpiry;
 });
 
 test('auth cookie can be cleared without changing its scope', () => {

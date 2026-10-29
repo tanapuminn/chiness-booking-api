@@ -112,6 +112,21 @@ if (runDatabaseTests) {
     assert.equal(await zoneConfigModel.exists({ id: 'B' }), null);
   });
 
+  test('admin cannot create a duplicate table name in the same zone', async () => {
+    process.env.JWT_SECRET ||= 'integration-test-secret';
+    const admin = await userModel.create({ email: 'table-name-admin@example.com', fullname: 'Admin', phone: '0800000063', role: 'admin' });
+    const token = jwt.sign({ id: admin.id }, process.env.JWT_SECRET);
+
+    const response = await request(app)
+      .post('/api/tables')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ id: 2, zone: 'A', name: 'Table 1', x: 2, y: 2 });
+
+    assert.equal(response.status, 409);
+    assert.match(response.body.message, /already exists/);
+    assert.equal(await tablePositionModel.countDocuments({ zone: 'A', name: 'Table 1' }), 1);
+  });
+
   test('unconfirmed legacy account is hidden and cannot create a booking or lock a seat', async () => {
     await appSettingModel.updateOne({ key: 'site' }, {
       $set: { bankName: 'Legacy Bank', bankAccountName: 'Legacy Owner', bankAccountNumber: '9999999999' },
@@ -675,7 +690,7 @@ if (runDatabaseTests) {
       phone: owner.phone,
       userId: owner._id,
       ...(role ? { createdByRole: role } : {}),
-      seats: [{ tableId: 1, seatNumber, zone: 'A', tableName: 'Table 1' }],
+      seats: [{ tableId: 1, seatNumber, zone: 'A', tableName: 'Table 1', studentName: `Student ${seatNumber}`, classLevel: `M.${seatNumber}` }],
       totalPrice: 100,
       bookingDate: new Date().toISOString(),
       status: 'confirmed',
@@ -688,6 +703,9 @@ if (runDatabaseTests) {
       makeBooking('BK-legacy-customer', customer, null, 4),
       makeBooking('BK-legacy-admin-b', adminB, null, 5),
     ]);
+    await bookingModel.updateOne({ id: 'BK-admin-a' }, {
+      $push: { seats: { tableId: 1, seatNumber: 6, zone: 'A', tableName: 'Table 1', studentName: 'Second Student', classLevel: 'M.6' } },
+    });
 
     process.env.JWT_SECRET ||= 'integration-test-secret';
     const tokenFor = (user) => jwt.sign({ id: user.id }, process.env.JWT_SECRET);
@@ -723,6 +741,22 @@ if (runDatabaseTests) {
       if (number > 1) exportIds.push(row.getCell(1).value);
     });
     assert.deepEqual(exportIds.sort(), ['BK-admin-a', 'BK-admin-b', 'BK-customer', 'BK-legacy-admin-b', 'BK-legacy-customer']);
+    const seatWorksheet = workbook.getWorksheet('Seat Details');
+    assert.ok(seatWorksheet);
+    const adminASeatRows = [];
+    seatWorksheet.eachRow((row, number) => {
+      if (number > 1 && row.getCell(1).value === 'BK-admin-a') {
+        adminASeatRows.push({
+          seatNumber: row.getCell(6).value,
+          studentName: row.getCell(7).value,
+          classLevel: row.getCell(8).value,
+        });
+      }
+    });
+    assert.deepEqual(adminASeatRows, [
+      { seatNumber: 1, studentName: 'Student 1', classLevel: 'M.1' },
+      { seatNumber: 6, studentName: 'Second Student', classLevel: 'M.6' },
+    ]);
 
     assert.equal((await asAdminA('put', '/api/bookings/BK-admin-b').send({ notes: 'changed' })).status, 200);
     assert.equal((await bookingModel.findOne({ id: 'BK-admin-b' })).notes, 'changed');

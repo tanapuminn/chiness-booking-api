@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { DEFAULT_GRID_SIZE, MIN_GRID_SIZE, MAX_GRID_SIZE } = require('../utils/zoneGrid');
 
 const zoneConfigSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
@@ -8,6 +9,10 @@ const zoneConfigSchema = new mongoose.Schema({
   allowIndividualSeatBooking: { type: Boolean, default: true },
   seatPrice: { type: Number, required: true },
   tablePrice: { type: Number, required: true },
+  color: { type: String, trim: true, uppercase: true, match: /^#[0-9A-F]{6}$/i },
+  // ขนาดผังโต๊ะของโซน ใช้ร่วมกันทุกเครื่องของแอดมิน
+  gridRows: { type: Number, default: DEFAULT_GRID_SIZE, min: MIN_GRID_SIZE, max: MAX_GRID_SIZE },
+  gridCols: { type: Number, default: DEFAULT_GRID_SIZE, min: MIN_GRID_SIZE, max: MAX_GRID_SIZE },
 });
 
 const zoneConfigModel = mongoose.model('zoneConfig', zoneConfigSchema)

@@ -27,6 +27,11 @@ export const createTable = async (req, res, next) => {
       return res.status(409).json({ message: `Table with id ${id} already exists in zone ${zone}` });
     }
 
+    const existingName = await tablePositionModel.findOne({ zone, name });
+    if (existingName) {
+      return res.status(409).json({ message: `Table with name ${name} already exists in zone ${zone}` });
+    }
+
     // Create new table document
     const table = new tablePositionModel({
       id,
