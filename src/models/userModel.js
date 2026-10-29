@@ -10,6 +10,10 @@ const userSchema = new mongoose.Schema({
   googleEmail: { type: String, trim: true, lowercase: true },
   googleName: { type: String, trim: true },
   avatarUrl: { type: String, trim: true },
+  // ลืมรหัสผ่าน: เก็บ hash ของ token และเวลาหมดอายุ ส่วน passwordChangedAt ใช้ยกเลิก session เก่า
+  passwordResetTokenHash: { type: String, index: true, sparse: true },
+  passwordResetExpiresAt: { type: Date },
+  passwordChangedAt: { type: Date },
   createdAt: { type: Date, default: Date.now },
 });
 

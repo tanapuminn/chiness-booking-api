@@ -4,6 +4,11 @@ const { OAuth2Client } = require('google-auth-library');
 const userModel = require('../models/userModel');
 const { setAuthCookie, clearAuthCookie } = require('../utils/authCookie');
 const { getAuthSessionDuration } = require('../utils/authSession');
+const {
+  RESET_TOKEN_TTL_MINUTES, MIN_PASSWORD_LENGTH, hashResetToken, createResetToken, buildResetUrl,
+} = require('../utils/passwordReset');
+// เรียกผ่าน object เพื่อให้ test แทนที่การส่งอีเมลได้
+const emailService = require('../services/emailService');
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -264,4 +269,81 @@ const me = async (req, res, next) => {
     next(error);
   }
 };
-module.exports = { register, login, googleLogin, updateProfile, me, logout };
+const FORGOT_PASSWORD_RESPONSE = { message: 'If an account exists for this email, a reset link has been sent' };
+
+// ตอบเหมือนกันทุกกรณี เพื่อไม่ให้ใช้ endpoint นี้เดาได้ว่าอีเมลไหนมีบัญชี
+const forgotPassword = async (req, res, next) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    const user = await userModel.findOne({ email });
+    if (!user) {
+      return res.json(FORGOT_PASSWORD_RESPONSE);
+    }
+
+    const { token, tokenHash, expiresAt } = createResetToken();
+    const resetUrl = buildResetUrl(token);
+    if (!resetUrl) {
+      console.error('Password reset skipped: FRONTEND_URL is not configured');
+      return res.json(FORGOT_PASSWORD_RESPONSE);
+    }
+
+    // ขอใหม่แล้วลิงก์เก่าใช้ไม่ได้ทันที เพราะเก็บ hash ได้ทีละอัน
+    user.passwordResetTokenHash = tokenHash;
+    user.passwordResetExpiresAt = expiresAt;
+    await user.save();
+
+    try {
+      await emailService.sendPasswordResetEmail({
+        to: user.email,
+        fullname: user.fullname,
+        resetUrl,
+        ttlMinutes: RESET_TOKEN_TTL_MINUTES,
+      });
+    } catch (emailError) {
+      console.error(`Failed to send password reset email for user ${user._id}:`, emailError);
+    }
+
+    res.json(FORGOT_PASSWORD_RESPONSE);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const resetPassword = async (req, res, next) => {
+  try {
+    const token = String(req.body.token || '');
+    const password = String(req.body.password || '');
+
+    if (!token) {
+      return res.status(400).json({ message: 'Reset token is required' });
+    }
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` });
+    }
+
+    const user = await userModel.findOne({
+      passwordResetTokenHash: hashResetToken(token),
+      passwordResetExpiresAt: { $gt: new Date() },
+    });
+    if (!user) {
+      return res.status(400).json({ message: 'Reset link is invalid or has expired' });
+    }
+
+    user.password = await bcrypt.hash(password, 10);
+    user.passwordResetTokenHash = undefined;
+    user.passwordResetExpiresAt = undefined;
+    user.passwordChangedAt = new Date();
+    await user.save();
+
+    clearAuthCookie(res);
+    res.json({ message: 'Password has been reset' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = { register, login, googleLogin, updateProfile, me, logout, forgotPassword, resetPassword };
